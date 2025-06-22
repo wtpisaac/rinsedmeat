@@ -27,6 +27,58 @@ RinsedMeatConfiguration :: struct {
 	},
 }
 
+// MARK: Rendering
+draw_frame :: proc(gpu: ^sdl3.GPUDevice, window: ^sdl3.Window, width: i32, height: i32) {
+	log.debug("Acquiring command buffer for frame")
+	gpu_command_buffer := sdl3.AcquireGPUCommandBuffer(gpu)
+	if (gpu_command_buffer == nil) {
+		HaltSDLPrintingMessage("Command buffer acquisition failed.")
+	}
+	log.debug("Command buffer acquired.")
+
+	// NOTE: Swapchain texture acquisition managed by SDL3 - should not free this texture
+	// See: https://wiki.libsdl.org/SDL3/SDL_WaitAndAcquireGPUSwapchainTexture#remarks
+	log.debug("Acquiring swapchain texture for command buffer")
+	swapchain_tex: ^sdl3.GPUTexture
+	swapchain_tex_width: ^u32
+	swapchain_tex_height: ^u32
+	swapchain_tex_success := sdl3.WaitAndAcquireGPUSwapchainTexture(
+		gpu_command_buffer,
+		window,
+		&swapchain_tex,
+		swapchain_tex_width,
+		swapchain_tex_height,
+	)
+	if !swapchain_tex_success {
+		HaltSDLPrintingMessage("Failed to acquire GPU swapchain texture.")
+	}
+	log.debug("Swapchain texture acquired.")
+
+	log.debug("Executing render pass.")
+	gpu_color_targets := []sdl3.GPUColorTargetInfo {
+		{
+			texture = swapchain_tex,
+			clear_color = {0.0, 0.5, 0.5, 1.0},
+			load_op = sdl3.GPULoadOp.CLEAR,
+			store_op = sdl3.GPUStoreOp.STORE,
+		},
+	}
+	gpu_render_pass := sdl3.BeginGPURenderPass(
+		gpu_command_buffer,
+		raw_data(gpu_color_targets),
+		1,
+		nil,
+	)
+	sdl3.EndGPURenderPass(gpu_render_pass)
+	log.debug("Render pass executed.")
+
+	log.debug("Submitting command buffer.")
+	gpu_command_buffer_submit_success := sdl3.SubmitGPUCommandBuffer(gpu_command_buffer)
+	if !gpu_command_buffer_submit_success {
+		HaltSDLPrintingMessage("Submission of command buffer to GPU failed.")
+	}
+}
+
 // MARK: Main Loop
 
 main :: proc() {
@@ -85,53 +137,6 @@ main :: proc() {
 	}
 	log.debug("Main window claimed for GPU.")
 
-	log.debug("Acquiring command buffer for frame")
-	gpu_command_buffer := sdl3.AcquireGPUCommandBuffer(gpu)
-	if (gpu_command_buffer == nil) {
-		HaltSDLPrintingMessage("Command buffer acquisition failed.")
-	}
-	log.debug("Command buffer acquired.")
-
-	log.debug("Acquiring swapchain texture for command buffer")
-	swapchain_tex: ^sdl3.GPUTexture
-	swapchain_tex_width: ^u32
-	swapchain_tex_height: ^u32
-	swapchain_tex_success := sdl3.WaitAndAcquireGPUSwapchainTexture(
-		gpu_command_buffer,
-		main_window,
-		&swapchain_tex,
-		swapchain_tex_width,
-		swapchain_tex_height,
-	)
-	if !swapchain_tex_success {
-		HaltSDLPrintingMessage("Failed to acquire GPU swapchain texture.")
-	}
-	log.debug("Swapchain texture acquired.")
-
-	log.debug("Executing render pass.")
-	gpu_color_targets := []sdl3.GPUColorTargetInfo {
-		{
-			texture = swapchain_tex,
-			clear_color = {0.0, 0.5, 0.5, 1.0},
-			load_op = sdl3.GPULoadOp.CLEAR,
-			store_op = sdl3.GPUStoreOp.STORE,
-		},
-	}
-	gpu_render_pass := sdl3.BeginGPURenderPass(
-		gpu_command_buffer,
-		raw_data(gpu_color_targets),
-		1,
-		nil,
-	)
-	sdl3.EndGPURenderPass(gpu_render_pass)
-	log.debug("Render pass executed.")
-
-	log.debug("Submitting command buffer.")
-	gpu_command_buffer_submit_success := sdl3.SubmitGPUCommandBuffer(gpu_command_buffer)
-	if !gpu_command_buffer_submit_success {
-		HaltSDLPrintingMessage("Submission of command buffer to GPU failed.")
-	}
-
 	should_keep_running := true
 	for should_keep_running {
 		event: sdl3.Event
@@ -141,6 +146,13 @@ main :: proc() {
 				should_keep_running = false
 			}
 		}
+
+		draw_frame(
+			gpu,
+			main_window,
+			i32(configuration.resolution.window_width),
+			i32(configuration.resolution.window_height),
+		)
 	}
 
 	log.info("Engine shutdown complete!")
