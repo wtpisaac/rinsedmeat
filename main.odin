@@ -1,5 +1,10 @@
 package main
 
+/*
+rinsedmeat - voxel engine prototyping
+copyright (c) 2025 Isaac Trimble-Pederson, All Rights Reserved
+*/
+
 import "core:log"
 import "core:os"
 import "vendor:sdl3"
