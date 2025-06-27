@@ -19,7 +19,6 @@ HaltSDLPrintingMessage :: proc(message: string) -> ! {
 }
 
 // MARK: Configuration
-// WARN: Mutation of the configuration object is not supported in this prototype.
 RinsedMeatConfiguration :: struct {
 	resolution: struct {
 		window_height: uint,
@@ -27,8 +26,15 @@ RinsedMeatConfiguration :: struct {
 	},
 }
 
+RinsedMeatEngineState :: struct {
+	resolution: struct {
+		h: i32,
+		w: i32,
+	},
+}
+
 // MARK: Rendering
-draw_frame :: proc(gpu: ^sdl3.GPUDevice, window: ^sdl3.Window, width: i32, height: i32) {
+draw_frame :: proc(gpu: ^sdl3.GPUDevice, window: ^sdl3.Window) {
 	log.debug("Acquiring command buffer for frame")
 	gpu_command_buffer := sdl3.AcquireGPUCommandBuffer(gpu)
 	if (gpu_command_buffer == nil) {
@@ -87,6 +93,12 @@ main :: proc() {
 	configuration := RinsedMeatConfiguration {
 		resolution = {window_width = 1280, window_height = 720},
 	}
+	state := RinsedMeatEngineState {
+		resolution = {
+			w = i32(configuration.resolution.window_width),
+			h = i32(configuration.resolution.window_height),
+		},
+	}
 	// Logging
 	context.logger = log.create_console_logger(allocator = context.temp_allocator)
 	log.info("rinsedmeat - engine demo created by Isaac Trimble-Pederson")
@@ -104,9 +116,9 @@ main :: proc() {
 	// initialize SDL3 window
 	main_window := sdl3.CreateWindow(
 		"rinsedmeat",
-		i32(configuration.resolution.window_width),
-		i32(configuration.resolution.window_height),
-		sdl3.WindowFlags{},
+		i32(state.resolution.w),
+		i32(state.resolution.h),
+		sdl3.WindowFlags{.RESIZABLE},
 	)
 	if (main_window == nil) {
 		HaltSDLPrintingMessage(
@@ -145,14 +157,24 @@ main :: proc() {
 			if event.type == .QUIT {
 				should_keep_running = false
 			}
+			if event.type == .WINDOW_RESIZED || event.type == .WINDOW_PIXEL_SIZE_CHANGED {
+				// TODO: Reset any relevant GPU state here
+
+				// MARK: Update properties from window
+				w: i32
+				h: i32
+				ok := sdl3.GetWindowSizeInPixels(main_window, &w, &h)
+				if !ok {
+					log.warn(
+						"Could not obtain window size in pixels despite resolution change - not failing but artifacts may be expected!",
+					)
+				}
+				state.resolution.h = h
+				state.resolution.w = w
+			}
 		}
 
-		draw_frame(
-			gpu,
-			main_window,
-			i32(configuration.resolution.window_width),
-			i32(configuration.resolution.window_height),
-		)
+		draw_frame(gpu, main_window)
 	}
 
 	log.info("Engine shutdown complete!")
