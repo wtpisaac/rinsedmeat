@@ -11,10 +11,26 @@ import "vendor:sdl3"
 
 // MARK: SDL Fatal Error Handling
 
-HaltSDLPrintingMessage :: proc(message: string) -> ! {
+HaltingErrorSource :: enum {
+	UNKNOWN,
+	CUSTOM,
+	SDL,
+}
+
+HaltPrintingMessage :: proc(message: string, source: HaltingErrorSource = .UNKNOWN) -> ! {
 	log.error("A FATAL ERROR HAS OCCURRED. THE PROGRAM WILL NOW HALT.")
 	log.error(message)
-	log.error(sdl3.GetError())
+	switch source {
+	case .UNKNOWN:
+		log.warn(
+			"No source for this error was defined. SDL's GetError will be logged below - do not trust this error, but attempt to ascertain if the error likely arose from an SDL call and use this as context",
+		)
+		log.warn(sdl3.GetError())
+	case .SDL:
+		log.error(sdl3.GetError())
+	case .CUSTOM:
+		break
+	}
 	os.exit(1)
 }
 
@@ -33,12 +49,43 @@ RinsedMeatEngineState :: struct {
 	},
 }
 
+// MARK: Mesh Management
+
+// Lots of unknowns here. Seems we are intended to submit meshes once and then do point updates on necessary metadata.
+// Given this, we probably want to be able to submit meshes and load/unload them at will.
+// We also need to associate a model-to-world space conversion.
+// In a proper engine this is probably hierarchical in a tree - let's KISS and keep a one-level flat hierarchy for now
+// will need a tree if/when we use this to render other objects (e.g., enemies)
+
+RinsedMeatScene :: struct {
+	meshes: [dynamic]RinsedMeatMesh,
+}
+
+RinsedMeatMesh :: struct {
+	model_to_world_mat: matrix[4, 4]f32,
+}
+
+SceneRegisterMesh :: proc(
+	scene: ^RinsedMeatScene,
+	vertices: []f32,
+	model_to_world_mat: matrix[4, 4]f32,
+) -> (
+	mesh: RinsedMeatMesh,
+	ok: bool,
+) {
+	// TODO: Implement
+	ok = false
+	return
+}
+
+// TODO: SceneDeleteMesh
+
 // MARK: Rendering
 draw_frame :: proc(gpu: ^sdl3.GPUDevice, window: ^sdl3.Window) {
 	log.debug("Acquiring command buffer for frame")
 	gpu_command_buffer := sdl3.AcquireGPUCommandBuffer(gpu)
 	if (gpu_command_buffer == nil) {
-		HaltSDLPrintingMessage("Command buffer acquisition failed.")
+		HaltPrintingMessage("Command buffer acquisition failed.", source = .SDL)
 	}
 	log.debug("Command buffer acquired.")
 
@@ -56,7 +103,7 @@ draw_frame :: proc(gpu: ^sdl3.GPUDevice, window: ^sdl3.Window) {
 		swapchain_tex_height,
 	)
 	if !swapchain_tex_success {
-		HaltSDLPrintingMessage("Failed to acquire GPU swapchain texture.")
+		HaltPrintingMessage("Failed to acquire GPU swapchain texture.", source = .SDL)
 	}
 	log.debug("Swapchain texture acquired.")
 
@@ -81,13 +128,83 @@ draw_frame :: proc(gpu: ^sdl3.GPUDevice, window: ^sdl3.Window) {
 	log.debug("Submitting command buffer.")
 	gpu_command_buffer_submit_success := sdl3.SubmitGPUCommandBuffer(gpu_command_buffer)
 	if !gpu_command_buffer_submit_success {
-		HaltSDLPrintingMessage("Submission of command buffer to GPU failed.")
+		HaltPrintingMessage("Submission of command buffer to GPU failed.", source = .SDL)
+	}
+}
+
+// MARK: Test Scene
+
+// NOTE: Praise the cube!
+register_test_mesh :: proc(scene: ^RinsedMeatScene) {
+	// TODO: Define cube meshes in model space.
+	// What is our model space?
+	// NOTE: Currently this is a SQUARE not a CUBE.
+	TEST_MESH_VERTICES: []f32 = {
+		// Front face, L
+		-1.0,
+		-1.0,
+		1.0,
+		-1.0,
+		1.0,
+		1.0,
+		1.0,
+		-1.0,
+		1.0,
+		// Front face, R
+		1.0,
+		-1.0,
+		1.0,
+		-1.0,
+		1.0,
+		1.0,
+		1.0,
+		1.0,
+		1.0,
+	}
+
+	// TODO: Implement perspective projection matrix.
+	model_to_world_matrix := matrix[4, 4]f32{
+		1.0, 0.0, 0.0, 0.0, 
+		0.0, 1.0, 0.0, 0.0, 
+		0.0, 0.0, 1.0, 0.0, 
+		0.0, 0.0, 0.0, 1.0, 
+	}
+
+	_, ok := SceneRegisterMesh(scene, TEST_MESH_VERTICES, model_to_world_matrix)
+	if (!ok) {
+		HaltPrintingMessage(
+			"Could not register test mesh. Likely unimplemented or possibly SDL error.",
+		)
 	}
 }
 
 // MARK: Main Loop
 
 main :: proc() {
+	// MARK: Tracking Allocator boilerplate
+	// https://gist.github.com/karl-zylinski/4ccf438337123e7c8994df3b03604e33
+	when ODIN_DEBUG {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		context.allocator = mem.tracking_allocator(&track)
+
+		defer {
+			if len(track.allocation_map) > 0 {
+				fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
+				for _, entry in track.allocation_map {
+					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+				}
+			}
+			if len(track.bad_free_array) > 0 {
+				fmt.eprintf("=== %v incorrect frees: ===\n", len(track.bad_free_array))
+				for entry in track.bad_free_array {
+					fmt.eprintf("- %p @ %v\n", entry.memory, entry.location)
+				}
+			}
+			mem.tracking_allocator_destroy(&track)
+		}
+	}
+
 	// Static configuration
 	// TODO: Load configuration from the disk or environment.
 	configuration := RinsedMeatConfiguration {
@@ -111,7 +228,7 @@ main :: proc() {
 	// initialize SDL window
 	// thanks for losing my code!!! should've used git!!!
 	init_ok := sdl3.Init(sdl3.InitFlags{.VIDEO, .EVENTS})
-	if (!init_ok) {HaltSDLPrintingMessage("SDL could not initialize with .VIDEO and .EVENTS. Are you running this in a limited (non-GUI) environment?")}
+	if (!init_ok) {HaltPrintingMessage("SDL could not initialize with .VIDEO and .EVENTS. Are you running this in a limited (non-GUI) environment?", source = .SDL)}
 
 	// initialize SDL3 window
 	main_window := sdl3.CreateWindow(
@@ -121,8 +238,9 @@ main :: proc() {
 		sdl3.WindowFlags{.RESIZABLE},
 	)
 	if (main_window == nil) {
-		HaltSDLPrintingMessage(
+		HaltPrintingMessage(
 			"Main window creation failed. The game cannot run without a window.",
+			source = .SDL,
 		)
 	}
 
@@ -138,14 +256,14 @@ main :: proc() {
 		"vulkan",
 	)
 	if gpu == nil {
-		HaltSDLPrintingMessage("GPU device initialization was not successful.")
+		HaltPrintingMessage("GPU device initialization was not successful.", source = .SDL)
 	}
 	log.debug("GPU device initialized.")
 
 	log.debug("Claiming to main window...")
 	gpu_window_claim_success := sdl3.ClaimWindowForGPUDevice(gpu, main_window)
 	if !gpu_window_claim_success {
-		HaltSDLPrintingMessage("Main window could not claim GPU device.")
+		HaltPrintingMessage("Main window could not claim GPU device.", source = .SDL)
 	}
 	log.debug("Main window claimed for GPU.")
 
