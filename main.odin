@@ -6,6 +6,7 @@ copyright (c) 2025 Isaac Trimble-Pederson, All Rights Reserved
 */
 
 import "core:log"
+import "core:mem"
 import "core:os"
 import "vendor:sdl3"
 
@@ -47,6 +48,7 @@ EngineState :: struct {
 		h: i32,
 		w: i32,
 	},
+	test_mesh:  Maybe(ActiveMesh),
 }
 
 // MARK: Mesh Management
@@ -58,24 +60,91 @@ EngineState :: struct {
 // will need a tree if/when we use this to render other objects (e.g., enemies)
 
 Scene :: struct {
-	meshes: [dynamic]Mesh,
+	gpu:           ^sdl3.GPUDevice,
+	active_meshes: [dynamic]ActiveMesh,
 }
 
-Mesh :: struct {
+SceneInit :: proc(gpu: ^sdl3.GPUDevice) -> Scene {
+	return Scene{gpu = gpu, active_meshes = {}}
+}
+
+ActiveMesh :: struct {
+	// TODO: Does this need a generation? or can we get away with just throwing meshes into the scene arbitrarily?
+	gpu_buffer:         ^sdl3.GPUBuffer,
 	model_to_world_mat: matrix[4, 4]f32,
 }
 
+@(require_results)
 SceneRegisterMesh :: proc(
 	scene: ^Scene,
 	vertices: []f32,
 	model_to_world_mat: matrix[4, 4]f32,
 ) -> (
-	mesh: Mesh,
+	mesh: ActiveMesh,
 	ok: bool,
 ) {
-	// TODO: Implement
-	ok = false
-	return
+	// MARK: Create the GPU buffer
+	buffer_create_info := sdl3.GPUBufferCreateInfo {
+		usage = sdl3.GPUBufferUsageFlags{.VERTEX},
+		size  = u32(len(vertices)),
+	}
+	buffer := sdl3.CreateGPUBuffer(scene.gpu, buffer_create_info)
+	if buffer == nil {
+		log.errorf("Could not create GPU buffer due to SDL error. %v", sdl3.GetError())
+		ok = false
+		return
+	}
+
+	// Transfer the data into the buffer
+	// We do not cycle what is in this buffer, so cycling does not matter yet.
+	// We should revisit this... can we reuse a fixed number of GPU buffers for chunks and utilize cycling?
+	transfer_buffer_create_info := sdl3.GPUTransferBufferCreateInfo {
+		usage = .UPLOAD,
+		size  = u32(len(vertices)),
+	}
+	transfer_buffer := sdl3.CreateGPUTransferBuffer(scene.gpu, transfer_buffer_create_info)
+	if transfer_buffer == nil {
+		ok = false
+		return
+	}
+	defer {sdl3.ReleaseGPUTransferBuffer(scene.gpu, transfer_buffer)}
+
+	transfer_map_loc := sdl3.MapGPUTransferBuffer(scene.gpu, transfer_buffer, false)
+	if transfer_map_loc == nil {
+		ok = false
+		return
+	}
+	mem.copy(transfer_map_loc, raw_data(vertices), len(vertices) * size_of(f32))
+
+	// Create a command buffer for submitting the copy
+	command_buffer := sdl3.AcquireGPUCommandBuffer(scene.gpu)
+	if command_buffer == nil {
+		ok = false
+		return
+	}
+	copy_pass := sdl3.BeginGPUCopyPass(command_buffer)
+	transfer_buffer_loc := sdl3.GPUTransferBufferLocation {
+		transfer_buffer = transfer_buffer,
+		offset          = 0,
+	}
+	gpu_buffer_region := sdl3.GPUBufferRegion {
+		buffer = buffer,
+		offset = 0,
+		size   = size_of(f32),
+	}
+	sdl3.UploadToGPUBuffer(copy_pass, transfer_buffer_loc, gpu_buffer_region, false)
+
+	submit_success := sdl3.SubmitGPUCommandBuffer(command_buffer)
+	if !submit_success {
+		ok = false
+		return
+	}
+
+	active_mesh := ActiveMesh {
+		gpu_buffer         = buffer,
+		model_to_world_mat = model_to_world_mat,
+	}
+	return active_mesh, true
 }
 
 // TODO: SceneDeleteMesh
@@ -135,7 +204,7 @@ draw_frame :: proc(gpu: ^sdl3.GPUDevice, window: ^sdl3.Window) {
 // MARK: Test Scene
 
 // NOTE: Praise the cube!
-register_test_mesh :: proc(scene: ^Scene) {
+register_test_mesh :: proc(state: ^EngineState, scene: ^Scene) {
 	// TODO: Define cube meshes in model space.
 	// What is our model space?
 	// NOTE: Currently this is a SQUARE not a CUBE.
@@ -171,12 +240,12 @@ register_test_mesh :: proc(scene: ^Scene) {
 		0.0, 0.0, 0.0, 1.0, 
 	}
 
-	_, ok := SceneRegisterMesh(scene, TEST_MESH_VERTICES, model_to_world_matrix)
+	mesh, ok := SceneRegisterMesh(scene, TEST_MESH_VERTICES, model_to_world_matrix)
 	if (!ok) {
-		HaltPrintingMessage(
-			"Could not register test mesh. Likely unimplemented or possibly SDL error.",
-		)
+		HaltPrintingMessage("Could not register test mesh due to SDL error", source = .SDL)
 	}
+
+	state.test_mesh = mesh
 }
 
 // MARK: Main Loop
