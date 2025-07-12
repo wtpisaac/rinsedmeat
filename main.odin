@@ -47,13 +47,14 @@ Configuration :: struct {
 }
 
 EngineState :: struct {
-	resolution:      struct {
+	resolution:        struct {
 		h: i32,
 		w: i32,
 	},
-	test_mesh:       Maybe(ActiveMesh),
-	vertex_shader:   ^sdl3.GPUShader,
-	fragment_shader: ^sdl3.GPUShader,
+	test_mesh:         Maybe(ActiveMesh),
+	vertex_shader:     ^sdl3.GPUShader,
+	fragment_shader:   ^sdl3.GPUShader,
+	graphics_pipeline: ^sdl3.GPUGraphicsPipeline,
 }
 
 // MARK: Mesh Management
@@ -398,6 +399,58 @@ main :: proc() {
 
 	state.vertex_shader = vertex_shader
 	state.fragment_shader = fragment_shader
+
+	log.debug("Shaders created!")
+
+	// MARK: Create GPU graphics pipeline
+	log.debug("Creating graphics pipeline...")
+	graphics_pipeline_create_info := sdl3.GPUGraphicsPipelineCreateInfo {
+		vertex_shader = vertex_shader,
+		fragment_shader = fragment_shader,
+		vertex_input_state = sdl3.GPUVertexInputState {
+			vertex_buffer_descriptions = raw_data(
+				[]sdl3.GPUVertexBufferDescription {
+					sdl3.GPUVertexBufferDescription {
+						slot = 0,
+						pitch = size_of(f32),
+						input_rate = .VERTEX,
+					},
+				},
+			),
+			num_vertex_buffers = 1,
+			vertex_attributes = raw_data(
+				[]sdl3.GPUVertexAttribute {
+					sdl3.GPUVertexAttribute {
+						location = 0,
+						buffer_slot = 0,
+						format = .FLOAT2,
+						offset = 0,
+					},
+				},
+			),
+			num_vertex_attributes = 1,
+		},
+		primitive_type = .TRIANGLELIST,
+		rasterizer_state = sdl3.GPURasterizerState {
+			fill_mode = .FILL,
+			cull_mode = .BACK,
+			front_face = .CLOCKWISE,
+		},
+		target_info = sdl3.GPUGraphicsPipelineTargetInfo {
+			color_target_descriptions = raw_data(
+				[]sdl3.GPUColorTargetDescription {
+					sdl3.GPUColorTargetDescription{format = sdl3.GPUTextureFormat.B8G8R8A8_UNORM},
+				},
+			),
+			num_color_targets = 1,
+		},
+	}
+	graphics_pipeline := sdl3.CreateGPUGraphicsPipeline(gpu, graphics_pipeline_create_info)
+	if graphics_pipeline == nil {
+		HaltPrintingMessage("Could not create graphics pipeline.", source = .SDL)
+	}
+	state.graphics_pipeline = graphics_pipeline
+	log.debug("Graphics pipeline created.")
 
 	should_keep_running := true
 	for should_keep_running {
