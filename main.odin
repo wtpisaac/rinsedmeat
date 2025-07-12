@@ -8,6 +8,9 @@ copyright (c) 2025 Isaac Trimble-Pederson, All Rights Reserved
 import "core:log"
 import "core:mem"
 import "core:os"
+import "core:os/os2"
+import "core:path/filepath"
+import "core:strings"
 import "vendor:sdl3"
 
 // MARK: SDL Fatal Error Handling
@@ -44,11 +47,13 @@ Configuration :: struct {
 }
 
 EngineState :: struct {
-	resolution: struct {
+	resolution:      struct {
 		h: i32,
 		w: i32,
 	},
-	test_mesh:  Maybe(ActiveMesh),
+	test_mesh:       Maybe(ActiveMesh),
+	vertex_shader:   ^sdl3.GPUShader,
+	fragment_shader: ^sdl3.GPUShader,
 }
 
 // MARK: Mesh Management
@@ -295,6 +300,20 @@ main :: proc() {
 		configuration.resolution.window_width,
 		configuration.resolution.window_height,
 	)
+
+	// Get program executable directory 
+	proc_info, proc_info_err := os2.current_process_info(
+		os2.Process_Info_Fields{.Executable_Path},
+		allocator = context.temp_allocator,
+	)
+	if proc_info_err != nil {
+		HaltPrintingMessage("Unexpected error fetching process info. Quitting.", source = .CUSTOM)
+	}
+
+	prog_path := strings.clone(proc_info.executable_path)
+	os2.free_process_info(proc_info, allocator = context.temp_allocator)
+	prog_dir := filepath.dir(prog_path)
+
 	// initialize SDL window
 	// thanks for losing my code!!! should've used git!!!
 	init_ok := sdl3.Init(sdl3.InitFlags{.VIDEO, .EVENTS})
@@ -336,6 +355,49 @@ main :: proc() {
 		HaltPrintingMessage("Main window could not claim GPU device.", source = .SDL)
 	}
 	log.debug("Main window claimed for GPU.")
+
+	// MARK: Loading shaders
+	log.debug("Loading shaders...")
+
+	log.debugf("Program path %v", prog_path)
+	vertex_shader_path, _ := filepath.join({prog_dir, "/shaders/shader.vert.spv"})
+	log.debugf("Loading vertex shader from %v", vertex_shader_path)
+	vertex_shader_contents, vertex_shader_read_ok := os.read_entire_file(vertex_shader_path)
+	if !vertex_shader_read_ok {
+		HaltPrintingMessage("Could not load vertex shader.", source = .CUSTOM)
+	}
+	vertex_shader_create_info := sdl3.GPUShaderCreateInfo {
+		code_size  = len(vertex_shader_contents),
+		code       = raw_data(vertex_shader_contents),
+		entrypoint = "main",
+		format     = sdl3.GPUShaderFormat{.SPIRV},
+		stage      = .VERTEX,
+	}
+	vertex_shader := sdl3.CreateGPUShader(gpu, vertex_shader_create_info)
+	if vertex_shader == nil {
+		HaltPrintingMessage("Could not create the vertex shader", source = .SDL)
+	}
+
+	fragment_shader_path, _ := filepath.join({prog_dir, "/shaders/shader.frag.spv"})
+	log.debugf("Loading fragment shader from %v", fragment_shader_path)
+	fragment_shader_contents, fragment_shader_read_ok := os.read_entire_file(fragment_shader_path)
+	if !fragment_shader_read_ok {
+		HaltPrintingMessage("Could not load fragment shader from disk.", source = .CUSTOM)
+	}
+	fragment_shader_create_info := sdl3.GPUShaderCreateInfo {
+		code_size  = len(fragment_shader_contents),
+		code       = raw_data(fragment_shader_contents),
+		entrypoint = "main",
+		format     = sdl3.GPUShaderFormat{.SPIRV},
+		stage      = .FRAGMENT,
+	}
+	fragment_shader := sdl3.CreateGPUShader(gpu, fragment_shader_create_info)
+	if fragment_shader == nil {
+		HaltPrintingMessage("Could not create the fragment shader", source = .SDL)
+	}
+
+	state.vertex_shader = vertex_shader
+	state.fragment_shader = fragment_shader
 
 	should_keep_running := true
 	for should_keep_running {
