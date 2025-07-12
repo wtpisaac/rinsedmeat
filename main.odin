@@ -35,14 +35,14 @@ HaltPrintingMessage :: proc(message: string, source: HaltingErrorSource = .UNKNO
 }
 
 // MARK: Configuration
-RinsedMeatConfiguration :: struct {
+Configuration :: struct {
 	resolution: struct {
 		window_height: uint,
 		window_width:  uint,
 	},
 }
 
-RinsedMeatEngineState :: struct {
+EngineState :: struct {
 	resolution: struct {
 		h: i32,
 		w: i32,
@@ -57,20 +57,20 @@ RinsedMeatEngineState :: struct {
 // In a proper engine this is probably hierarchical in a tree - let's KISS and keep a one-level flat hierarchy for now
 // will need a tree if/when we use this to render other objects (e.g., enemies)
 
-RinsedMeatScene :: struct {
-	meshes: [dynamic]RinsedMeatMesh,
+Scene :: struct {
+	meshes: [dynamic]Mesh,
 }
 
-RinsedMeatMesh :: struct {
+Mesh :: struct {
 	model_to_world_mat: matrix[4, 4]f32,
 }
 
 SceneRegisterMesh :: proc(
-	scene: ^RinsedMeatScene,
+	scene: ^Scene,
 	vertices: []f32,
 	model_to_world_mat: matrix[4, 4]f32,
 ) -> (
-	mesh: RinsedMeatMesh,
+	mesh: Mesh,
 	ok: bool,
 ) {
 	// TODO: Implement
@@ -135,7 +135,7 @@ draw_frame :: proc(gpu: ^sdl3.GPUDevice, window: ^sdl3.Window) {
 // MARK: Test Scene
 
 // NOTE: Praise the cube!
-register_test_mesh :: proc(scene: ^RinsedMeatScene) {
+register_test_mesh :: proc(scene: ^Scene) {
 	// TODO: Define cube meshes in model space.
 	// What is our model space?
 	// NOTE: Currently this is a SQUARE not a CUBE.
@@ -163,10 +163,11 @@ register_test_mesh :: proc(scene: ^RinsedMeatScene) {
 	}
 
 	// TODO: Implement perspective projection matrix.
+	// FIXME: Below is a scale matrix for testing. This is not permanent.
 	model_to_world_matrix := matrix[4, 4]f32{
-		1.0, 0.0, 0.0, 0.0, 
-		0.0, 1.0, 0.0, 0.0, 
-		0.0, 0.0, 1.0, 0.0, 
+		0.5, 0.0, 0.0, 0.0, 
+		0.0, 0.5, 0.0, 0.0, 
+		0.0, 0.0, 0.5, 0.0, 
 		0.0, 0.0, 0.0, 1.0, 
 	}
 
@@ -207,10 +208,10 @@ main :: proc() {
 
 	// Static configuration
 	// TODO: Load configuration from the disk or environment.
-	configuration := RinsedMeatConfiguration {
+	configuration := Configuration {
 		resolution = {window_width = 1280, window_height = 720},
 	}
-	state := RinsedMeatEngineState {
+	state := EngineState {
 		resolution = {
 			w = i32(configuration.resolution.window_width),
 			h = i32(configuration.resolution.window_height),
