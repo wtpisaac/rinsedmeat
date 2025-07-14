@@ -237,6 +237,13 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 		),
 		1,
 	)
+	// TODO: Should this be moved somewhere else?
+	sdl3.PushGPUComputeUniformData(
+		gpu_command_buffer,
+		0, // TODO: Make this not a magic number!
+		raw_data(&test_mesh.model_to_world_mat),
+		16 * size_of(f32), // TODO: Make this not a magic number for matrix element count
+	)
 	sdl3.DrawGPUPrimitives(gpu_render_pass, test_mesh.vertex_count, 1, 0, 0)
 	log.debug("Do we make it here?")
 	log.debugf("%v", test_mesh.vertex_count)
@@ -417,11 +424,12 @@ main :: proc() {
 		HaltPrintingMessage("Could not load vertex shader.", source = .CUSTOM)
 	}
 	vertex_shader_create_info := sdl3.GPUShaderCreateInfo {
-		code_size  = len(vertex_shader_contents),
-		code       = raw_data(vertex_shader_contents),
-		entrypoint = "main",
-		format     = sdl3.GPUShaderFormat{.SPIRV},
-		stage      = .VERTEX,
+		code_size           = len(vertex_shader_contents),
+		code                = raw_data(vertex_shader_contents),
+		entrypoint          = "main",
+		format              = sdl3.GPUShaderFormat{.SPIRV},
+		stage               = .VERTEX,
+		num_uniform_buffers = 1,
 	}
 	vertex_shader := sdl3.CreateGPUShader(gpu, vertex_shader_create_info)
 	if vertex_shader == nil {
