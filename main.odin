@@ -96,7 +96,7 @@ StateRegisterMesh :: proc(
 	// MARK: Create the GPU buffer
 	buffer_create_info := sdl3.GPUBufferCreateInfo {
 		usage = sdl3.GPUBufferUsageFlags{.VERTEX},
-		size  = u32(len(vertices)),
+		size  = u32(size_of(f32) * len(vertices)),
 	}
 	buffer := sdl3.CreateGPUBuffer(state.gpu, buffer_create_info)
 	if buffer == nil {
@@ -110,7 +110,7 @@ StateRegisterMesh :: proc(
 	// We should revisit this... can we reuse a fixed number of GPU buffers for chunks and utilize cycling?
 	transfer_buffer_create_info := sdl3.GPUTransferBufferCreateInfo {
 		usage = .UPLOAD,
-		size  = u32(len(vertices)),
+		size  = u32(size_of(f32) * len(vertices)),
 	}
 	transfer_buffer := sdl3.CreateGPUTransferBuffer(state.gpu, transfer_buffer_create_info)
 	if transfer_buffer == nil {
@@ -140,7 +140,7 @@ StateRegisterMesh :: proc(
 	gpu_buffer_region := sdl3.GPUBufferRegion {
 		buffer = buffer,
 		offset = 0,
-		size   = size_of(f32),
+		size   = u32(len(vertices) * size_of(f32)),
 	}
 	sdl3.UploadToGPUBuffer(copy_pass, transfer_buffer_loc, gpu_buffer_region, false)
 	sdl3.EndGPUCopyPass(copy_pass)
@@ -461,7 +461,7 @@ main :: proc() {
 				[]sdl3.GPUVertexBufferDescription {
 					sdl3.GPUVertexBufferDescription {
 						slot = 0,
-						pitch = size_of(f32),
+						pitch = 3 * size_of(f32),
 						input_rate = .VERTEX,
 					},
 				},
@@ -472,7 +472,7 @@ main :: proc() {
 					sdl3.GPUVertexAttribute {
 						location = 0,
 						buffer_slot = 0,
-						format = .FLOAT2,
+						format = .FLOAT3,
 						offset = 0,
 					},
 				},
