@@ -52,6 +52,8 @@ EngineState :: struct {
 		w: i32,
 	},
 	test_mesh:         Maybe(ActiveMesh),
+	// MARK: SDL3 GPU (Device, Shaders, etc.)
+	gpu:               ^sdl3.GPUDevice,
 	vertex_shader:     ^sdl3.GPUShader,
 	fragment_shader:   ^sdl3.GPUShader,
 	graphics_pipeline: ^sdl3.GPUGraphicsPipeline,
@@ -78,11 +80,13 @@ ActiveMesh :: struct {
 	// TODO: Does this need a generation? or can we get away with just throwing meshes into the scene arbitrarily?
 	gpu_buffer:         ^sdl3.GPUBuffer,
 	model_to_world_mat: matrix[4, 4]f32,
+	vertex_count:       u32,
 }
 
+// TODO: Make this attach to the Scene, or ditch the Scene concept for the prototype.
 @(require_results)
-SceneRegisterMesh :: proc(
-	scene: ^Scene,
+StateRegisterMesh :: proc(
+	state: ^EngineState,
 	vertices: []f32,
 	model_to_world_mat: matrix[4, 4]f32,
 ) -> (
@@ -94,7 +98,7 @@ SceneRegisterMesh :: proc(
 		usage = sdl3.GPUBufferUsageFlags{.VERTEX},
 		size  = u32(len(vertices)),
 	}
-	buffer := sdl3.CreateGPUBuffer(scene.gpu, buffer_create_info)
+	buffer := sdl3.CreateGPUBuffer(state.gpu, buffer_create_info)
 	if buffer == nil {
 		log.errorf("Could not create GPU buffer due to SDL error. %v", sdl3.GetError())
 		ok = false
@@ -108,14 +112,14 @@ SceneRegisterMesh :: proc(
 		usage = .UPLOAD,
 		size  = u32(len(vertices)),
 	}
-	transfer_buffer := sdl3.CreateGPUTransferBuffer(scene.gpu, transfer_buffer_create_info)
+	transfer_buffer := sdl3.CreateGPUTransferBuffer(state.gpu, transfer_buffer_create_info)
 	if transfer_buffer == nil {
 		ok = false
 		return
 	}
-	defer {sdl3.ReleaseGPUTransferBuffer(scene.gpu, transfer_buffer)}
+	defer {sdl3.ReleaseGPUTransferBuffer(state.gpu, transfer_buffer)}
 
-	transfer_map_loc := sdl3.MapGPUTransferBuffer(scene.gpu, transfer_buffer, false)
+	transfer_map_loc := sdl3.MapGPUTransferBuffer(state.gpu, transfer_buffer, false)
 	if transfer_map_loc == nil {
 		ok = false
 		return
@@ -123,7 +127,7 @@ SceneRegisterMesh :: proc(
 	mem.copy(transfer_map_loc, raw_data(vertices), len(vertices) * size_of(f32))
 
 	// Create a command buffer for submitting the copy
-	command_buffer := sdl3.AcquireGPUCommandBuffer(scene.gpu)
+	command_buffer := sdl3.AcquireGPUCommandBuffer(state.gpu)
 	if command_buffer == nil {
 		ok = false
 		return
@@ -139,6 +143,7 @@ SceneRegisterMesh :: proc(
 		size   = size_of(f32),
 	}
 	sdl3.UploadToGPUBuffer(copy_pass, transfer_buffer_loc, gpu_buffer_region, false)
+	sdl3.EndGPUCopyPass(copy_pass)
 
 	submit_success := sdl3.SubmitGPUCommandBuffer(command_buffer)
 	if !submit_success {
@@ -149,6 +154,7 @@ SceneRegisterMesh :: proc(
 	active_mesh := ActiveMesh {
 		gpu_buffer         = buffer,
 		model_to_world_mat = model_to_world_mat,
+		vertex_count       = u32(len(vertices)),
 	}
 	return active_mesh, true
 }
@@ -156,9 +162,9 @@ SceneRegisterMesh :: proc(
 // TODO: SceneDeleteMesh
 
 // MARK: Rendering
-draw_frame :: proc(gpu: ^sdl3.GPUDevice, window: ^sdl3.Window) {
+draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 	log.debug("Acquiring command buffer for frame")
-	gpu_command_buffer := sdl3.AcquireGPUCommandBuffer(gpu)
+	gpu_command_buffer := sdl3.AcquireGPUCommandBuffer(state.gpu)
 	if (gpu_command_buffer == nil) {
 		HaltPrintingMessage("Command buffer acquisition failed.", source = .SDL)
 	}
@@ -191,12 +197,49 @@ draw_frame :: proc(gpu: ^sdl3.GPUDevice, window: ^sdl3.Window) {
 			store_op = sdl3.GPUStoreOp.STORE,
 		},
 	}
+
+	// MARK: Render Pass
 	gpu_render_pass := sdl3.BeginGPURenderPass(
 		gpu_command_buffer,
 		raw_data(gpu_color_targets),
 		1,
 		nil,
 	)
+
+	sdl3.BindGPUGraphicsPipeline(gpu_render_pass, state.graphics_pipeline)
+
+	sdl3.SetGPUViewport(
+		gpu_render_pass,
+		sdl3.GPUViewport {
+			x         = 0.0, // f32(state.resolution.w) / 2.0,
+			y         = 0.0, // f32(state.resolution.h) / 2.0,
+			w         = f32(state.resolution.w),
+			h         = f32(state.resolution.h),
+			min_depth = 0.0,
+			max_depth = 1.0,
+		},
+	)
+
+	// FIXME: Move off test mesh into generalizable logic
+	test_mesh := state.test_mesh.?
+
+	// TODO: What exactly is happening with the GPU Vertex Buffers?
+	// It seems like it is possible to pass multiple vertex buffers into one command...
+	// is that sensible? What is the advantage? Because we need different calls for uniforms...
+	// maybe for instancing?
+	sdl3.BindGPUVertexBuffers(
+		gpu_render_pass,
+		0, // TODO: Check slot
+		raw_data(
+			[]sdl3.GPUBufferBinding {
+				sdl3.GPUBufferBinding{buffer = test_mesh.gpu_buffer, offset = 0},
+			},
+		),
+		1,
+	)
+	sdl3.DrawGPUPrimitives(gpu_render_pass, test_mesh.vertex_count, 1, 0, 0)
+	log.debug("Do we make it here?")
+	log.debugf("%v", test_mesh.vertex_count)
 	sdl3.EndGPURenderPass(gpu_render_pass)
 	log.debug("Render pass executed.")
 
@@ -210,7 +253,7 @@ draw_frame :: proc(gpu: ^sdl3.GPUDevice, window: ^sdl3.Window) {
 // MARK: Test Scene
 
 // NOTE: Praise the cube!
-register_test_mesh :: proc(state: ^EngineState, scene: ^Scene) {
+register_test_mesh :: proc(state: ^EngineState) {
 	// TODO: Define cube meshes in model space.
 	// What is our model space?
 	// NOTE: Currently this is a SQUARE not a CUBE.
@@ -246,7 +289,7 @@ register_test_mesh :: proc(state: ^EngineState, scene: ^Scene) {
 		0.0, 0.0, 0.0, 1.0, 
 	}
 
-	mesh, ok := SceneRegisterMesh(scene, TEST_MESH_VERTICES, model_to_world_matrix)
+	mesh, ok := StateRegisterMesh(state, TEST_MESH_VERTICES, model_to_world_matrix)
 	if (!ok) {
 		HaltPrintingMessage("Could not register test mesh due to SDL error", source = .SDL)
 	}
@@ -317,8 +360,13 @@ main :: proc() {
 
 	// initialize SDL window
 	// thanks for losing my code!!! should've used git!!!
+	sdl3.SetHint("SDL_RENDER_VULKAN_DEBUG", "1")
 	init_ok := sdl3.Init(sdl3.InitFlags{.VIDEO, .EVENTS})
 	if (!init_ok) {HaltPrintingMessage("SDL could not initialize with .VIDEO and .EVENTS. Are you running this in a limited (non-GUI) environment?", source = .SDL)}
+
+	// Enable Vulkan Validation Hints
+	sdl3.SetHint("SDL_RENDER_VULKAN_DEBUG", "1")
+	log.debug("Vulkan Validation Layers are ACTIVE")
 
 	// initialize SDL3 window
 	main_window := sdl3.CreateWindow(
@@ -348,6 +396,7 @@ main :: proc() {
 	if gpu == nil {
 		HaltPrintingMessage("GPU device initialization was not successful.", source = .SDL)
 	}
+	state.gpu = gpu
 	log.debug("GPU device initialized.")
 
 	log.debug("Claiming to main window...")
@@ -433,7 +482,7 @@ main :: proc() {
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = sdl3.GPURasterizerState {
 			fill_mode = .FILL,
-			cull_mode = .BACK,
+			cull_mode = .NONE,
 			front_face = .CLOCKWISE,
 		},
 		target_info = sdl3.GPUGraphicsPipelineTargetInfo {
@@ -451,6 +500,9 @@ main :: proc() {
 	}
 	state.graphics_pipeline = graphics_pipeline
 	log.debug("Graphics pipeline created.")
+
+	// MARK: Test Mesh Registration
+	register_test_mesh(&state)
 
 	should_keep_running := true
 	for should_keep_running {
@@ -477,7 +529,7 @@ main :: proc() {
 			}
 		}
 
-		draw_frame(gpu, main_window)
+		draw_frame(state, main_window)
 	}
 
 	log.info("Engine shutdown complete!")
