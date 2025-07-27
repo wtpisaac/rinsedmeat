@@ -6,12 +6,90 @@ copyright (c) 2025 Isaac Trimble-Pederson, All Rights Reserved
 */
 
 import "core:log"
+import "core:math"
 import "core:mem"
 import "core:os"
 import "core:os/os2"
 import "core:path/filepath"
 import "core:strings"
 import "vendor:sdl3"
+
+// MARK: Perspective Projection
+/*
+	NOTE: Perspective Projection from World Coordinates to Vulkan NDC
+
+	WARN: SDL GPU API has its own coordinate conventions not necessarily
+	aligned with the Vulkan specification. I should keep this in mind if and when
+	I transition to using the Vulkan API for my work.
+
+	SDL's coordinates are defined as follows:
+	NDC -> Centered around (0, 0), bottom left (-1, -1), top right (1, 1)
+	Viewport -> Top left (0, 0) bottom right (viewportWidth, viewportHeight)
+	Texture coordinates -> Top-left (0,0) bottom-right (1, 1) (+Y down)
+	Source: https://wiki.libsdl.org/SDL3/CategoryGPU
+
+	Real Time Rendering describes a view frustum
+	The view frustum ranges from a near plane to a far plane
+	(l, b, n) to (r, b, n) describes the coordinates of the near plane in the view space
+	I want to analyze this projection matrix - unsure what it is doing exactly.	
+
+	// NOTE: General Remarks
+	// I honestly did not know where to start on this. However, reading the Wikipedia article on FOV
+	// helped to give me some context, leading me to this article
+	// https://en.wikipedia.org/wiki/Field_of_view_in_video_games
+	// This article mentions "Hor+" and this is the approach I have tried to model.
+	// I did the trig by hand, have decided to try treating the near plane *as* the screen,
+	// then we pass in a desired vfov to lock into, and then make the l/r differ by the screen res.
+	// I then took a perspective projection matrix from DirectX's example described in Real Time Rendering
+	// given SDL's coordinate system seems to model DirectX's (on my cursory inspection of the left handed
+	// coordinate space, and the [0, 1] z range.
+*/
+
+make_perspective_matrix :: proc(
+	near: f32,
+	far: f32,
+	vfov_deg: f32,
+	screen_w_res: f32,
+	screen_h_res: f32,
+) -> matrix[4, 4]f32 {
+	// Take screen resolution, near, compute r and l
+	// We assume the vertical distance to be d=1, and take the horizontal as a multiplier (its aspect ratio)
+	// This is independent of resolution, because we are converting into NDC, not raw pixels.
+	vfov_rad := math.to_radians_f32(vfov_deg)
+	horizontal_per_vertical := screen_w_res / screen_h_res
+	top := near * math.tan_f32(vfov_rad / 2)
+	bottom := -top
+	// TODO: Will this work...
+	right := top * horizontal_per_vertical
+	left := -right
+
+	// NOTE: Source matrix in Real Time Rendering, section 4.7 projections, DirectX
+	return {
+		(2 * near) / (right - left),
+		0,
+		0,
+		0,
+		0,
+		(2 * near) / (top - bottom),
+		0,
+		0,
+		// NOTE: We are not using the x/y alterations of the z-coordinate, because our frusta are
+		// not presently asymmetric, and these will always resolve to zero.
+		// If we were to e.g. support VR, Real Time Rendering indicates we might want to alter this
+		// to accept asymmetric frustums.
+		0,
+		0,
+		// NOTE: Using the DirectX z-plane calculations, given we have a [0, 1] z range,
+		// not OpenGL [-1, 1], and should not need the mirroring since the axis works positive
+		// for further.
+		far / (far - near),
+		-1 * ((far * near) / (far - near)),
+		0,
+		0,
+		1,
+		0,
+	}
+}
 
 // MARK: SDL Fatal Error Handling
 
@@ -238,11 +316,28 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 		1,
 	)
 	// TODO: Should this be moved somewhere else?
-	sdl3.PushGPUComputeUniformData(
+	sdl3.PushGPUVertexUniformData(
 		gpu_command_buffer,
 		0, // TODO: Make this not a magic number!
 		raw_data(&test_mesh.model_to_world_mat),
-		16 * size_of(f32), // TODO: Make this not a magic number for matrix element count
+		size_of(test_mesh.model_to_world_mat), // TODO: Make this not a magic number for matrix element count
+	)
+	// TODO: Push perspective matrix
+	perspective_matrix := make_perspective_matrix(
+		1.0,
+		100,
+		// NOTE: vFOV currently hack from 90 deg hFOV on 16:9 via below calculator.
+		// https://themetalmuncher.github.io/fov-calc/
+		// TODO: Validate above, and figure out the math!
+		47,
+		f32(state.resolution.w),
+		f32(state.resolution.h),
+	)
+	sdl3.PushGPUVertexUniformData(
+		gpu_command_buffer,
+		1,
+		raw_data(&perspective_matrix),
+		size_of(perspective_matrix),
 	)
 	sdl3.DrawGPUPrimitives(gpu_render_pass, test_mesh.vertex_count, 1, 0, 0)
 	log.debug("Do we make it here?")
@@ -268,23 +363,23 @@ register_test_mesh :: proc(state: ^EngineState) {
 		// Front face, L
 		-1.0,
 		-1.0,
-		1.0,
+		5.0,
 		-1.0,
 		1.0,
-		1.0,
+		5.0,
 		1.0,
 		-1.0,
-		1.0,
+		5.0,
 		// Front face, R
 		1.0,
 		-1.0,
-		1.0,
+		5.0,
 		-1.0,
 		1.0,
+		5.0,
 		1.0,
 		1.0,
-		1.0,
-		1.0,
+		5.0,
 	}
 
 	// TODO: Implement perspective projection matrix.
@@ -429,7 +524,7 @@ main :: proc() {
 		entrypoint          = "main",
 		format              = sdl3.GPUShaderFormat{.SPIRV},
 		stage               = .VERTEX,
-		num_uniform_buffers = 1,
+		num_uniform_buffers = 2,
 	}
 	vertex_shader := sdl3.CreateGPUShader(gpu, vertex_shader_create_info)
 	if vertex_shader == nil {
@@ -491,7 +586,7 @@ main :: proc() {
 		rasterizer_state = sdl3.GPURasterizerState {
 			fill_mode = .FILL,
 			cull_mode = .NONE,
-			front_face = .CLOCKWISE,
+			front_face = .COUNTER_CLOCKWISE,
 		},
 		target_info = sdl3.GPUGraphicsPipelineTargetInfo {
 			color_target_descriptions = raw_data(
@@ -512,6 +607,7 @@ main :: proc() {
 	// MARK: Test Mesh Registration
 	register_test_mesh(&state)
 
+	// MARK: Event Loop
 	should_keep_running := true
 	for should_keep_running {
 		event: sdl3.Event
