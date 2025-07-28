@@ -10,15 +10,24 @@ layout(set = 1, binding = 0) uniform UniformBufferObject {
 layout(set = 1, binding = 1) uniform ProjMat {
 	mat4 mat;
 } proj;
+layout(set = 1, binding = 2) uniform CamMat {
+	mat4 mat;
+} cam;
+layout(set = 1, binding = 3) uniform NormalMat {
+	mat3 mat;
+} norm;
 
 // MARK: Lighting
-const vec4 POSITIVE_Z = vec4(0.0, 0.0, 1.0, 0.0);
+// NOTE: We use NEGATIVE_Z to simplify alignment and avoid an add op - dot product aligning with negative
+// aligns with our test lighting from camera alignment.
+const vec3 NEGATIVE_Z = vec3(0.0, 0.0, -1.0);
 
 void main() {
-	gl_Position = proj.mat * model.mat * vec4(inPosition, 1.0);
-	vec4 adj_face_normal = proj.mat * model.mat * vec4(faceNormal, 0.0);
-
-	float lighting_alignment = clamp(dot(POSITIVE_Z, adj_face_normal), 0.0, 1.0);	
+	gl_Position = proj.mat * cam.mat * model.mat * vec4(inPosition, 1.0);
+	
+	vec3 adj_face_normal = normalize(norm.mat * faceNormal);
+	float lighting_alignment = clamp(dot(NEGATIVE_Z, adj_face_normal), 0.0, 1.0);
 	float light = 0.1 + (0.9 * lighting_alignment);
 	fragColor = vec3(0.0, light, 0.0);
+	// fragColor = adj_face_normal;
 }

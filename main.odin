@@ -93,12 +93,33 @@ make_perspective_matrix :: proc(
 	}
 }
 
+// MARK: Camera
+make_camera_matrix :: proc(position: [3]f32, rotation_y_deg: f32) -> matrix[4, 4]f32 {
+	translation_matrix := matrix[4, 4]f32{
+		1, 0, 0, -position.x, 
+		0, 1, 0, -position.y, 
+		0, 0, 1, -position.z, 
+		0, 0, 0, 1, 
+	}
+	rotation_y_rad := math.to_radians_f32(rotation_y_deg)
+	rotation_inv_matrix := matrix[4, 4]f32{
+		math.cos_f32(rotation_y_rad), 0, math.sin_f32(rotation_y_rad), 0, 
+		0, 1, 0, 0, 
+		-1 * math.sin_f32(rotation_y_rad), 0, math.cos_f32(rotation_y_rad), 0, 
+		0, 0, 0, 1, 
+	}
+	rotation_matrix := linalg.transpose(rotation_inv_matrix)
+
+	return rotation_matrix * translation_matrix
+}
+
 // MARK: Lighting Computations
 
 // NOTE: We need face normals for a simplified lighting model. This will enable us to visually inspect
 // a rotating cube and make sense of it, to spot check our perspective projection. We will simulate
 // a directional floodlight by taking a dot product of the normal directions and the relevant
 // z-direction.
+// TODO: Can this be done using a compute shader?
 make_normals :: proc(vertices: []f32, normalize: bool = true) -> []f32 {
 	assert(
 		len(vertices) % 9 == 0,
@@ -215,6 +236,14 @@ test_normal_computations_normalization_off :: proc(t: ^testing.T) {
 
 }
 
+make_normal_matrix :: proc(model: matrix[4, 4]f32, cam: matrix[4, 4]f32) -> matrix[3, 3]f32 {
+	mat3 :: distinct matrix[3, 3]f32
+	cam3 := mat3(cam)
+	model3 := mat3(model)
+	mcp := cam3 * model3
+	return linalg.transpose(linalg.matrix3_adjoint(mcp))
+}
+
 // MARK: SDL Fatal Error Handling
 
 HaltingErrorSource :: enum {
@@ -284,6 +313,7 @@ ActiveMesh :: struct {
 	normals_gpu_buffer: ^sdl3.GPUBuffer,
 	model_to_world_mat: matrix[4, 4]f32,
 	vertex_count:       u32,
+	normals:            []f32,
 }
 
 // TODO: Make this attach to the Scene, or ditch the Scene concept for the prototype.
@@ -297,6 +327,7 @@ StateRegisterMesh :: proc(
 	mesh: ActiveMesh,
 	ok: bool,
 ) {
+	log.debugf("REGISTERING VERTS %v WITH NORMALS %v", vertices, normals)
 	assert(
 		len(vertices) % 9 == 0,
 		"Provided vertex buffer failed modulo 9 check; must provide full triangles with 3-dim coordinates.",
@@ -422,7 +453,8 @@ StateRegisterMesh :: proc(
 		gpu_buffer         = buffer,
 		normals_gpu_buffer = normal_buffer,
 		model_to_world_mat = model_to_world_mat,
-		vertex_count       = u32(len(vertices)),
+		vertex_count       = u32(len(vertices) / 3),
+		normals            = normals,
 	}
 	return active_mesh, true
 }
@@ -516,7 +548,7 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 	// TODO: Push perspective matrix
 	perspective_matrix := make_perspective_matrix(
 		1.0,
-		100,
+		20,
 		// NOTE: vFOV currently hack from 90 deg hFOV on 16:9 via below calculator.
 		// https://themetalmuncher.github.io/fov-calc/
 		// TODO: Validate above, and figure out the math!
@@ -524,12 +556,44 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 		f32(state.resolution.w),
 		f32(state.resolution.h),
 	)
+	log.debugf("perspective matrix: %v", perspective_matrix)
 	sdl3.PushGPUVertexUniformData(
 		gpu_command_buffer,
 		1,
 		raw_data(&perspective_matrix),
 		size_of(perspective_matrix),
 	)
+	camera_matrix := make_camera_matrix({3, 0, 0}, -30)
+	log.debugf("camera matrix: %v", camera_matrix)
+	sdl3.PushGPUVertexUniformData(
+		gpu_command_buffer,
+		2,
+		raw_data(&camera_matrix),
+		size_of(camera_matrix),
+	)
+	normal_matrix := make_normal_matrix(test_mesh.model_to_world_mat, camera_matrix)
+	sdl3.PushGPUVertexUniformData(
+		gpu_command_buffer,
+		3,
+		raw_data(&normal_matrix),
+		size_of(normal_matrix),
+	)
+	// FIXME: Remove this debug log
+	/*
+	debug_verts := make([]f32, test_mesh.vertex_count, context.temp_allocator)
+	for i in 0 ..< (test_mesh.vertex_count / 3) {
+		vec: [3]f32 = {
+			test_mesh.normals[i * 3],
+			test_mesh.normals[i * 3 + 1],
+			test_mesh.normals[i * 3 + 2],
+		}
+		transformed := normal_matrix * vec
+		debug_verts[i * 3] = transformed[0]
+		debug_verts[i * 3 + 1] = transformed[1]
+		debug_verts[i * 3 + 2] = transformed[2]
+	}
+	log.debugf("transformed normals %v", debug_verts)
+	*/
 	sdl3.DrawGPUPrimitives(gpu_render_pass, test_mesh.vertex_count, 1, 0, 0)
 	log.debug("Do we make it here?")
 	log.debugf("%v", test_mesh.vertex_count)
@@ -547,39 +611,135 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 
 // NOTE: Praise the cube!
 register_test_mesh :: proc(state: ^EngineState) {
-	// TODO: Define cube meshes in model space.
-	// What is our model space?
-	// NOTE: Currently this is a SQUARE not a CUBE.
 	TEST_MESH_VERTICES: []f32 = {
-		// Front face, L
-		-1.0,
-		-1.0,
-		5.0,
-		-1.0,
-		1.0,
-		5.0,
-		1.0,
-		-1.0,
-		5.0,
-		// Front face, R
-		1.0,
-		-1.0,
-		5.0,
-		-1.0,
-		1.0,
-		5.0,
-		1.0,
-		1.0,
-		5.0,
+		// Front L
+		-0.5,
+		-0.5,
+		-0.5,
+		-0.5,
+		0.5,
+		-0.5,
+		0.5,
+		0.5,
+		-0.5,
+		// Front R
+		0.5,
+		0.5,
+		-0.5,
+		0.5,
+		-0.5,
+		-0.5,
+		-0.5,
+		-0.5,
+		-0.5,
+		// Right L
+		0.5,
+		-0.5,
+		-0.5,
+		0.5,
+		0.5,
+		-0.5,
+		0.5,
+		0.5,
+		0.5,
+		// Right R
+		0.5,
+		0.5,
+		0.5,
+		0.5,
+		-0.5,
+		0.5,
+		0.5,
+		-0.5,
+		-0.5,
+		// Back L
+		0.5,
+		-0.5,
+		0.5,
+		0.5,
+		0.5,
+		0.5,
+		-0.5,
+		0.5,
+		0.5,
+		// Back R
+		-0.5,
+		0.5,
+		0.5,
+		-0.5,
+		-0.5,
+		0.5,
+		0.5,
+		-0.5,
+		0.5,
+		// Left L
+		-0.5,
+		-0.5,
+		0.5,
+		-0.5,
+		0.5,
+		0.5,
+		-0.5,
+		0.5,
+		-0.5,
+		// Left R
+		-0.5,
+		0.5,
+		-0.5,
+		-0.5,
+		-0.5,
+		-0.5,
+		-0.5,
+		-0.5,
+		0.5,
+		// Top L
+		-0.5,
+		0.5,
+		-0.5,
+		-0.5,
+		0.5,
+		0.5,
+		0.5,
+		0.5,
+		0.5,
+		// Top R
+		0.5,
+		0.5,
+		0.5,
+		0.5,
+		0.5,
+		-0.5,
+		-0.5,
+		0.5,
+		-0.5,
+		// Bottom L
+		-0.5,
+		-0.5,
+		0.5,
+		-0.5,
+		-0.5,
+		-0.5,
+		0.5,
+		-0.5,
+		-0.5,
+		// Bottom R
+		0.5,
+		-0.5,
+		-0.5,
+		0.5,
+		-0.5,
+		0.5,
+		-0.5,
+		-0.5,
+		0.5,
 	}
 	test_mesh_normals := make_normals(TEST_MESH_VERTICES)
+	log.debugf("mesh normals: %v", test_mesh_normals)
 
-	// TODO: Implement perspective projection matrix.
-	// FIXME: Below is a scale matrix for testing. This is not permanent.
 	model_to_world_matrix := matrix[4, 4]f32{
-		0.5, 0.0, 0.0, 0.0, 
-		0.0, 0.5, 0.0, 0.0, 
-		0.0, 0.0, 0.5, 0.0, 
+		1.0, 0.0, 0.0, 0.0, 
+		0.0, 1.0, 0.0, 0.0, 
+		0.0, 0.0, 1.0, 4.0, 
 		0.0, 0.0, 0.0, 1.0, 
 	}
 
@@ -721,7 +881,7 @@ main :: proc() {
 		entrypoint          = "main",
 		format              = sdl3.GPUShaderFormat{.SPIRV},
 		stage               = .VERTEX,
-		num_uniform_buffers = 2,
+		num_uniform_buffers = 4,
 	}
 	vertex_shader := sdl3.CreateGPUShader(gpu, vertex_shader_create_info)
 	if vertex_shader == nil {
@@ -764,9 +924,14 @@ main :: proc() {
 						pitch = 3 * size_of(f32),
 						input_rate = .VERTEX,
 					},
+					sdl3.GPUVertexBufferDescription {
+						slot = 1,
+						pitch = 3 * size_of(f32),
+						input_rate = .VERTEX,
+					},
 				},
 			),
-			num_vertex_buffers = 1,
+			num_vertex_buffers = 2,
 			vertex_attributes = raw_data(
 				[]sdl3.GPUVertexAttribute {
 					sdl3.GPUVertexAttribute {
@@ -777,7 +942,7 @@ main :: proc() {
 					},
 					sdl3.GPUVertexAttribute {
 						location = 1,
-						buffer_slot = 0,
+						buffer_slot = 1,
 						format = .FLOAT3,
 						offset = 0,
 					},
@@ -788,8 +953,9 @@ main :: proc() {
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = sdl3.GPURasterizerState {
 			fill_mode = .FILL,
-			cull_mode = .NONE,
-			front_face = .COUNTER_CLOCKWISE,
+			cull_mode = .BACK,
+			front_face = .CLOCKWISE,
+			enable_depth_clip = true,
 		},
 		target_info = sdl3.GPUGraphicsPipelineTargetInfo {
 			color_target_descriptions = raw_data(
@@ -837,6 +1003,9 @@ main :: proc() {
 		}
 
 		draw_frame(state, main_window)
+
+		// Clear allocator at end of frame
+		// free_all(context.temp_allocator)
 	}
 
 	log.info("Engine shutdown complete!")
