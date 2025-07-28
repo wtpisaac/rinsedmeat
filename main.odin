@@ -7,11 +7,13 @@ copyright (c) 2025 Isaac Trimble-Pederson, All Rights Reserved
 
 import "core:log"
 import "core:math"
+import "core:math/linalg"
 import "core:mem"
 import "core:os"
 import "core:os/os2"
 import "core:path/filepath"
 import "core:strings"
+import "core:testing"
 import "vendor:sdl3"
 
 // MARK: Perspective Projection
@@ -91,6 +93,128 @@ make_perspective_matrix :: proc(
 	}
 }
 
+// MARK: Lighting Computations
+
+// NOTE: We need face normals for a simplified lighting model. This will enable us to visually inspect
+// a rotating cube and make sense of it, to spot check our perspective projection. We will simulate
+// a directional floodlight by taking a dot product of the normal directions and the relevant
+// z-direction.
+make_normals :: proc(vertices: []f32, normalize: bool = true) -> []f32 {
+	assert(
+		len(vertices) % 9 == 0,
+		"Incoming vertices must be % 9 == 0, must be three-dim * three per face.",
+	)
+	triangle_count := len(vertices) / 9
+
+	// Allocate destination array 
+	// Each face should get one normal
+	normals := make([]f32, len(vertices))
+
+	for i in 0 ..< triangle_count {
+		// NOTE: Take a cross product from two vectors
+		// The first vector is the first vertex to the second
+		// The second vector is the second vertex to the third
+		base_idx := i * 9
+		vAB: [3]f32 = {
+			vertices[base_idx + 3] - vertices[base_idx + 0],
+			vertices[base_idx + 4] - vertices[base_idx + 1],
+			vertices[base_idx + 5] - vertices[base_idx + 2],
+		}
+		vBC: [3]f32 = {
+			vertices[base_idx + 6] - vertices[base_idx + 3],
+			vertices[base_idx + 7] - vertices[base_idx + 4],
+			vertices[base_idx + 8] - vertices[base_idx + 5],
+		}
+		cross_vec := linalg.vector_cross3(vAB, vBC)
+		if (normalize) {
+			cross_vec = linalg.vector_normalize0(cross_vec)
+		}
+		// TODO: Do we really need to send three identical data points to the GPU? Case for indexing?
+		normals[base_idx] = cross_vec[0]
+		normals[base_idx + 3] = cross_vec[0]
+		normals[base_idx + 6] = cross_vec[0]
+		normals[base_idx + 1] = cross_vec[1]
+		normals[base_idx + 4] = cross_vec[1]
+		normals[base_idx + 7] = cross_vec[1]
+		normals[base_idx + 2] = cross_vec[2]
+		normals[base_idx + 5] = cross_vec[2]
+		normals[base_idx + 8] = cross_vec[2]
+	}
+
+	return normals
+}
+
+@(test)
+test_normal_computations_basic :: proc(t: ^testing.T) {
+	vertices: []f32 = {
+		// First triangle
+		0.0,
+		0.0,
+		0.0,
+		1.0,
+		0.0,
+		0.0,
+		0.0,
+		1.0,
+		0.0,
+		// Second triangle
+		0.0,
+		0.0,
+		0.0,
+		2.0,
+		0.0,
+		0.0,
+		0.0,
+		0.0,
+		2.0,
+	}
+
+	results := make_normals(vertices)
+
+	testing.expect_value(t, len(results), 18)
+	testing.expect_value(t, results[0], 0.0)
+	testing.expect_value(t, results[1], 0.0)
+	testing.expect_value(t, results[2], 1.0)
+	// Further are repeats. Eventually we should refactor to compress this to an identifier.
+	testing.expect_value(t, results[3], 0.0)
+	testing.expect_value(t, results[4], 0.0)
+	testing.expect_value(t, results[5], 1.0)
+	testing.expect_value(t, results[6], 0.0)
+	testing.expect_value(t, results[7], 0.0)
+	testing.expect_value(t, results[8], 1.0)
+
+
+	testing.expect_value(t, results[9], 0.0)
+	testing.expect_value(t, results[10], -1.0)
+	testing.expect_value(t, results[11], 0.0)
+	testing.expect_value(t, results[12], 0.0)
+	testing.expect_value(t, results[13], -1.0)
+	testing.expect_value(t, results[14], 0.0)
+	testing.expect_value(t, results[15], 0.0)
+	testing.expect_value(t, results[16], -1.0)
+	testing.expect_value(t, results[17], 0.0)
+
+}
+
+@(test)
+test_normal_computations_normalization_off :: proc(t: ^testing.T) {
+	vertices: []f32 = {0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0}
+
+	results := make_normals(vertices, normalize = false)
+
+	testing.expect_value(t, len(results), 9)
+	testing.expect_value(t, results[0], 0.0)
+	testing.expect_value(t, results[1], -4.0)
+	testing.expect_value(t, results[2], 0.0)
+	testing.expect_value(t, results[3], 0.0)
+	testing.expect_value(t, results[4], -4.0)
+	testing.expect_value(t, results[5], 0.0)
+	testing.expect_value(t, results[6], 0.0)
+	testing.expect_value(t, results[7], -4.0)
+	testing.expect_value(t, results[8], 0.0)
+
+}
+
 // MARK: SDL Fatal Error Handling
 
 HaltingErrorSource :: enum {
@@ -157,6 +281,7 @@ SceneInit :: proc(gpu: ^sdl3.GPUDevice) -> Scene {
 ActiveMesh :: struct {
 	// TODO: Does this need a generation? or can we get away with just throwing meshes into the scene arbitrarily?
 	gpu_buffer:         ^sdl3.GPUBuffer,
+	normals_gpu_buffer: ^sdl3.GPUBuffer,
 	model_to_world_mat: matrix[4, 4]f32,
 	vertex_count:       u32,
 }
@@ -166,11 +291,18 @@ ActiveMesh :: struct {
 StateRegisterMesh :: proc(
 	state: ^EngineState,
 	vertices: []f32,
+	normals: []f32,
 	model_to_world_mat: matrix[4, 4]f32,
 ) -> (
 	mesh: ActiveMesh,
 	ok: bool,
 ) {
+	assert(
+		len(vertices) % 9 == 0,
+		"Provided vertex buffer failed modulo 9 check; must provide full triangles with 3-dim coordinates.",
+	)
+	assert(len(normals) == len(vertices), "Number of normals does not match len(vertices)")
+
 	// MARK: Create the GPU buffer
 	buffer_create_info := sdl3.GPUBufferCreateInfo {
 		usage = sdl3.GPUBufferUsageFlags{.VERTEX},
@@ -178,7 +310,23 @@ StateRegisterMesh :: proc(
 	}
 	buffer := sdl3.CreateGPUBuffer(state.gpu, buffer_create_info)
 	if buffer == nil {
-		log.errorf("Could not create GPU buffer due to SDL error. %v", sdl3.GetError())
+		log.errorf(
+			"Could not create GPU buffer for vertices due to SDL error. %v",
+			sdl3.GetError(),
+		)
+		ok = false
+		return
+	}
+	normal_buffer_create_info := sdl3.GPUBufferCreateInfo {
+		usage = sdl3.GPUBufferUsageFlags{.VERTEX},
+		size  = u32(size_of(f32) * len(normals)),
+	}
+	normal_buffer := sdl3.CreateGPUBuffer(state.gpu, normal_buffer_create_info)
+	if normal_buffer == nil {
+		log.errorf(
+			"Could not create GPU buffer for face normals due to SDL error. %v",
+			sdl3.GetError(),
+		)
 		ok = false
 		return
 	}
@@ -197,12 +345,37 @@ StateRegisterMesh :: proc(
 	}
 	defer {sdl3.ReleaseGPUTransferBuffer(state.gpu, transfer_buffer)}
 
+	normals_transfer_buffer_create_info := sdl3.GPUTransferBufferCreateInfo {
+		usage = .UPLOAD,
+		size  = u32(size_of(f32) * len(normals)),
+	}
+	normals_transfer_buffer := sdl3.CreateGPUTransferBuffer(
+		state.gpu,
+		normals_transfer_buffer_create_info,
+	)
+	if normals_transfer_buffer == nil {
+		ok = false
+		return
+	}
+	defer {sdl3.ReleaseGPUTransferBuffer(state.gpu, normals_transfer_buffer)}
+
 	transfer_map_loc := sdl3.MapGPUTransferBuffer(state.gpu, transfer_buffer, false)
 	if transfer_map_loc == nil {
 		ok = false
 		return
 	}
 	mem.copy(transfer_map_loc, raw_data(vertices), len(vertices) * size_of(f32))
+
+	normals_transfer_map_loc := sdl3.MapGPUTransferBuffer(
+		state.gpu,
+		normals_transfer_buffer,
+		false,
+	)
+	if normals_transfer_map_loc == nil {
+		ok = false
+		return
+	}
+	mem.copy(normals_transfer_map_loc, raw_data(normals), len(normals) * size_of(f32))
 
 	// Create a command buffer for submitting the copy
 	command_buffer := sdl3.AcquireGPUCommandBuffer(state.gpu)
@@ -221,6 +394,22 @@ StateRegisterMesh :: proc(
 		size   = u32(len(vertices) * size_of(f32)),
 	}
 	sdl3.UploadToGPUBuffer(copy_pass, transfer_buffer_loc, gpu_buffer_region, false)
+
+	normals_transfer_buffer_loc := sdl3.GPUTransferBufferLocation {
+		transfer_buffer = normals_transfer_buffer,
+		offset          = 0,
+	}
+	normals_gpu_buffer_region := sdl3.GPUBufferRegion {
+		buffer = normal_buffer,
+		offset = 0,
+		size   = u32(len(normals) * size_of(f32)),
+	}
+	sdl3.UploadToGPUBuffer(
+		copy_pass,
+		normals_transfer_buffer_loc,
+		normals_gpu_buffer_region,
+		false,
+	)
 	sdl3.EndGPUCopyPass(copy_pass)
 
 	submit_success := sdl3.SubmitGPUCommandBuffer(command_buffer)
@@ -231,6 +420,7 @@ StateRegisterMesh :: proc(
 
 	active_mesh := ActiveMesh {
 		gpu_buffer         = buffer,
+		normals_gpu_buffer = normal_buffer,
 		model_to_world_mat = model_to_world_mat,
 		vertex_count       = u32(len(vertices)),
 	}
@@ -270,7 +460,7 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 	gpu_color_targets := []sdl3.GPUColorTargetInfo {
 		{
 			texture = swapchain_tex,
-			clear_color = {0.0, 0.5, 0.5, 1.0},
+			clear_color = {0.0, 0.0, 1.0, 1.0},
 			load_op = sdl3.GPULoadOp.CLEAR,
 			store_op = sdl3.GPUStoreOp.STORE,
 		},
@@ -311,9 +501,10 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 		raw_data(
 			[]sdl3.GPUBufferBinding {
 				sdl3.GPUBufferBinding{buffer = test_mesh.gpu_buffer, offset = 0},
+				sdl3.GPUBufferBinding{buffer = test_mesh.normals_gpu_buffer, offset = 0},
 			},
 		),
-		1,
+		2,
 	)
 	// TODO: Should this be moved somewhere else?
 	sdl3.PushGPUVertexUniformData(
@@ -381,6 +572,7 @@ register_test_mesh :: proc(state: ^EngineState) {
 		1.0,
 		5.0,
 	}
+	test_mesh_normals := make_normals(TEST_MESH_VERTICES)
 
 	// TODO: Implement perspective projection matrix.
 	// FIXME: Below is a scale matrix for testing. This is not permanent.
@@ -391,7 +583,12 @@ register_test_mesh :: proc(state: ^EngineState) {
 		0.0, 0.0, 0.0, 1.0, 
 	}
 
-	mesh, ok := StateRegisterMesh(state, TEST_MESH_VERTICES, model_to_world_matrix)
+	mesh, ok := StateRegisterMesh(
+		state,
+		TEST_MESH_VERTICES,
+		test_mesh_normals,
+		model_to_world_matrix,
+	)
 	if (!ok) {
 		HaltPrintingMessage("Could not register test mesh due to SDL error", source = .SDL)
 	}
@@ -578,9 +775,15 @@ main :: proc() {
 						format = .FLOAT3,
 						offset = 0,
 					},
+					sdl3.GPUVertexAttribute {
+						location = 1,
+						buffer_slot = 0,
+						format = .FLOAT3,
+						offset = 0,
+					},
 				},
 			),
-			num_vertex_attributes = 1,
+			num_vertex_attributes = 2,
 		},
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = sdl3.GPURasterizerState {
