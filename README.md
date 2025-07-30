@@ -1,4 +1,7 @@
 # rinsedmeat
+
+![a screenshot of a cube with debug (normals) lighting](doc/screenshot_cube_normal.png)
+
 learning computer graphics
 
 ## Copyright
