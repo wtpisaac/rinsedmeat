@@ -236,12 +236,15 @@ test_normal_computations_normalization_off :: proc(t: ^testing.T) {
 
 }
 
-make_normal_matrix :: proc(model: matrix[4, 4]f32, cam: matrix[4, 4]f32) -> matrix[3, 3]f32 {
+make_normal_matrix :: proc(model: matrix[4, 4]f32, cam: matrix[4, 4]f32) -> matrix[4, 4]f32 {
 	mat3 :: distinct matrix[3, 3]f32
+	mat4 :: distinct matrix[4, 4]f32
 	cam3 := mat3(cam)
 	model3 := mat3(model)
-	mcp := cam3 * model3
-	return linalg.transpose(linalg.matrix3_adjoint(mcp))
+	cm3 := cam3 * model3
+	cm4: matrix[4, 4]f32 = mat4(cm3)
+	cm4T := linalg.inverse_transpose(cm4)
+	return cm4T
 }
 
 // MARK: SDL Fatal Error Handling
@@ -492,7 +495,7 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 	gpu_color_targets := []sdl3.GPUColorTargetInfo {
 		{
 			texture = swapchain_tex,
-			clear_color = {0.0, 0.0, 1.0, 1.0},
+			clear_color = {0.1, 0.1, 0.1, 1.0},
 			load_op = sdl3.GPULoadOp.CLEAR,
 			store_op = sdl3.GPUStoreOp.STORE,
 		},
@@ -523,10 +526,6 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 	// FIXME: Move off test mesh into generalizable logic
 	test_mesh := state.test_mesh.?
 
-	// TODO: What exactly is happening with the GPU Vertex Buffers?
-	// It seems like it is possible to pass multiple vertex buffers into one command...
-	// is that sensible? What is the advantage? Because we need different calls for uniforms...
-	// maybe for instancing?
 	sdl3.BindGPUVertexBuffers(
 		gpu_render_pass,
 		0, // TODO: Check slot
@@ -538,14 +537,6 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 		),
 		2,
 	)
-	// TODO: Should this be moved somewhere else?
-	sdl3.PushGPUVertexUniformData(
-		gpu_command_buffer,
-		0, // TODO: Make this not a magic number!
-		raw_data(&test_mesh.model_to_world_mat),
-		size_of(test_mesh.model_to_world_mat), // TODO: Make this not a magic number for matrix element count
-	)
-	// TODO: Push perspective matrix
 	perspective_matrix := make_perspective_matrix(
 		1.0,
 		20,
@@ -557,24 +548,17 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 		f32(state.resolution.h),
 	)
 	log.debugf("perspective matrix: %v", perspective_matrix)
+	camera_pos := [3]f32{3, 1, 0}
+	camera_matrix := make_camera_matrix(camera_pos, -35)
+	log.debugf("camera matrix: %v", camera_matrix)
+	mvp := perspective_matrix * camera_matrix * test_mesh.model_to_world_mat
+	sdl3.PushGPUVertexUniformData(gpu_command_buffer, 0, raw_data(&mvp), size_of(mvp))
+
+	normal_matrix := make_normal_matrix(test_mesh.model_to_world_mat, camera_matrix)
+	log.debugf("normal matrix: %v", normal_matrix)
 	sdl3.PushGPUVertexUniformData(
 		gpu_command_buffer,
 		1,
-		raw_data(&perspective_matrix),
-		size_of(perspective_matrix),
-	)
-	camera_matrix := make_camera_matrix({3, 0, 0}, -30)
-	log.debugf("camera matrix: %v", camera_matrix)
-	sdl3.PushGPUVertexUniformData(
-		gpu_command_buffer,
-		2,
-		raw_data(&camera_matrix),
-		size_of(camera_matrix),
-	)
-	normal_matrix := make_normal_matrix(test_mesh.model_to_world_mat, camera_matrix)
-	sdl3.PushGPUVertexUniformData(
-		gpu_command_buffer,
-		3,
 		raw_data(&normal_matrix),
 		size_of(normal_matrix),
 	)
@@ -881,7 +865,7 @@ main :: proc() {
 		entrypoint          = "main",
 		format              = sdl3.GPUShaderFormat{.SPIRV},
 		stage               = .VERTEX,
-		num_uniform_buffers = 4,
+		num_uniform_buffers = 2,
 	}
 	vertex_shader := sdl3.CreateGPUShader(gpu, vertex_shader_create_info)
 	if vertex_shader == nil {
