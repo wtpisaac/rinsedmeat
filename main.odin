@@ -90,7 +90,18 @@ make_perspective_matrix :: proc(
 }
 
 // MARK: Camera
-make_camera_matrix :: proc(position: [3]f32, rotation_y_deg: f32) -> matrix[4, 4]f32 {
+CameraState :: struct {
+	rotation: struct {
+		y: f32,
+		x: f32,
+	},
+}
+
+make_camera_matrix :: proc(
+	position: [3]f32,
+	rotation_y_deg: f32,
+	rotation_x_deg: f32,
+) -> matrix[4, 4]f32 {
 	// NOTE: A camera matrix's purpose is to transform the world space into the camera space.
 	// The "camera space" is the transformation of the space of the world into that which aligns the
 	// +Z direction into that of the ray pointing outwards of the camera lens.
@@ -108,12 +119,26 @@ make_camera_matrix :: proc(position: [3]f32, rotation_y_deg: f32) -> matrix[4, 4
 		0, 0, 0, 1, 
 	}
 	rotation_y_rad := math.to_radians_f32(rotation_y_deg)
-	rotation_inv_matrix := matrix[4, 4]f32{
+	rotation_y_inv_matrix := matrix[4, 4]f32{
 		math.cos_f32(rotation_y_rad), 0, math.sin_f32(rotation_y_rad), 0, 
 		0, 1, 0, 0, 
 		-1 * math.sin_f32(rotation_y_rad), 0, math.cos_f32(rotation_y_rad), 0, 
 		0, 0, 0, 1, 
 	}
+	rotation_x_rad := math.to_radians_f32(rotation_x_deg)
+	rotation_x_inv_matrix := matrix[4, 4]f32{
+		1, 0, 0, 0, 
+		0, math.cos_f32(rotation_x_rad), -1 * math.sin_f32(rotation_x_rad), 0, 
+		0, math.sin_f32(rotation_x_rad), math.cos_f32(rotation_x_rad), 0, 
+		0, 0, 0, 1, 
+	}
+	// NOTE: See "Euler Angles" on Wikipedia, Rotation matrix
+	// R = X(a)Y(b)Z(c)
+	// https://en.wikipedia.org/wiki/Euler_angles
+	// NOTE: The rotation occurred in the opposite direction I expected and rolled the camera
+	// for y rotations - I believe because we are taking the transpose? In any case,
+	// x then y seems to do the job correctly without the unexpected spinning.
+	rotation_inv_matrix := rotation_y_inv_matrix * rotation_x_inv_matrix
 	rotation_matrix := linalg.transpose(rotation_inv_matrix)
 
 	return rotation_matrix * translation_matrix
@@ -315,6 +340,7 @@ EngineState :: struct {
 		h: i32,
 		w: i32,
 	},
+	camera:            CameraState,
 	test_mesh:         Maybe(ActiveMesh),
 	// MARK: SDL3 GPU (Device, Shaders, etc.)
 	gpu:               ^sdl3.GPUDevice,
@@ -620,7 +646,11 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 	)
 	log.debugf("perspective matrix: %v", perspective_matrix)
 	camera_pos := [3]f32{3, 1, 0}
-	camera_matrix := make_camera_matrix(camera_pos, -35)
+	camera_matrix := make_camera_matrix(
+		camera_pos,
+		state.camera.rotation.y,
+		state.camera.rotation.x,
+	)
 	log.debugf("camera matrix: %v", camera_matrix)
 	mvp := perspective_matrix * camera_matrix * test_mesh.model_to_world_mat
 	sdl3.PushGPUVertexUniformData(gpu_command_buffer, 0, raw_data(&mvp), size_of(mvp))
@@ -795,6 +825,7 @@ register_test_mesh :: proc(state: ^EngineState) {
 
 	state.test_mesh = mesh
 }
+
 
 // MARK: Main Loop
 
@@ -1021,6 +1052,11 @@ main :: proc() {
 	// MARK: Test Mesh Registration
 	register_test_mesh(&state)
 
+	mouse_rel_ok := sdl3.SetWindowRelativeMouseMode(main_window, true)
+	if !mouse_rel_ok {
+		HaltPrintingMessage("Could not set mouse to relative mode", .SDL)
+	}
+
 	// MARK: Event Loop
 	should_keep_running := true
 	for should_keep_running {
@@ -1045,6 +1081,34 @@ main :: proc() {
 				}
 				state.resolution.h = h
 				state.resolution.w = w
+			}
+			// TODO: Expand this mouse handling!
+			if event.type == .MOUSE_MOTION {
+				dx: f32
+				dy: f32
+				flags := sdl3.GetRelativeMouseState(&dx, &dy)
+
+				log.debugf("dx %v", dx)
+				log.debugf("dy %v", dy)
+
+				// NOTE: Swap x, y
+				// Horizontal movement should be an *x-axis* rotation
+				// Vertical movement should be a *y-axis* rotation
+				// Screen x, y inverted from the desired rotation axis
+				normalized_dx := (dy * 10) / (f32(state.resolution.w))
+				normalized_dy := (dx * 10) / (f32(state.resolution.h))
+
+				// NOTE: Camera should be able to move up and down [-90deg, 90deg]; clamp
+				// Camera should be able to spin around endlessly, wrap
+				// We use these to prevent these values from becoming very large over time,
+				// causing precision loss
+				state.camera.rotation.x = clamp(state.camera.rotation.x + normalized_dx, -90, 90)
+				state.camera.rotation.y = math.wrap(state.camera.rotation.y + normalized_dy, 360)
+				log.debugf(
+					"camera rot: x %v y %v",
+					state.camera.rotation.x,
+					state.camera.rotation.y,
+				)
 			}
 		}
 
