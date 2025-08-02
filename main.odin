@@ -20,10 +20,6 @@ import "vendor:sdl3"
 /*
 	NOTE: Perspective Projection from World Coordinates to Vulkan NDC
 
-	WARN: SDL GPU API has its own coordinate conventions not necessarily
-	aligned with the Vulkan specification. I should keep this in mind if and when
-	I transition to using the Vulkan API for my work.
-
 	SDL's coordinates are defined as follows:
 	NDC -> Centered around (0, 0), bottom left (-1, -1), top right (1, 1)
 	Viewport -> Top left (0, 0) bottom right (viewportWidth, viewportHeight)
@@ -33,7 +29,6 @@ import "vendor:sdl3"
 	Real Time Rendering describes a view frustum
 	The view frustum ranges from a near plane to a far plane
 	(l, b, n) to (r, b, n) describes the coordinates of the near plane in the view space
-	I want to analyze this projection matrix - unsure what it is doing exactly.	
 
 	// NOTE: General Remarks
 	// I honestly did not know where to start on this. However, reading the Wikipedia article on FOV
@@ -61,7 +56,8 @@ make_perspective_matrix :: proc(
 	horizontal_per_vertical := screen_w_res / screen_h_res
 	top := near * math.tan_f32(vfov_rad / 2)
 	bottom := -top
-	// TODO: Will this work...
+	// TODO: In rewrite, we should revisit this mathematics, and provide options if it would help for scaling
+	// into different configurations.
 	right := top * horizontal_per_vertical
 	left := -right
 
@@ -95,6 +91,16 @@ make_perspective_matrix :: proc(
 
 // MARK: Camera
 make_camera_matrix :: proc(position: [3]f32, rotation_y_deg: f32) -> matrix[4, 4]f32 {
+	// NOTE: A camera matrix's purpose is to transform the world space into the camera space.
+	// The "camera space" is the transformation of the space of the world into that which aligns the
+	// +Z direction into that of the ray pointing outwards of the camera lens.
+	// To perform this coordinate space transformation, we need to perform two actions.
+	// 1. Translate the positions of the world by the opposite of that of the camera's position, thus
+	// equalizing the camera and world positions by each other's difference.
+	// 2. Rotate all the coordinates of this translated world by what is necessary to move their positions
+	// into the desired rotation of the camera, thus bringing the world into the direction which the camera
+	// is intended to rotate, with the camera remaining still, using the transpose of the matrix, which on
+	// an orthogonal matrix (typical) acts as the inverse.
 	translation_matrix := matrix[4, 4]f32{
 		1, 0, 0, -position.x, 
 		0, 1, 0, -position.y, 
@@ -119,7 +125,6 @@ make_camera_matrix :: proc(position: [3]f32, rotation_y_deg: f32) -> matrix[4, 4
 // a rotating cube and make sense of it, to spot check our perspective projection. We will simulate
 // a directional floodlight by taking a dot product of the normal directions and the relevant
 // z-direction.
-// TODO: Can this be done using a compute shader?
 make_normals :: proc(vertices: []f32, normalize: bool = true) -> []f32 {
 	assert(
 		len(vertices) % 9 == 0,
@@ -135,6 +140,8 @@ make_normals :: proc(vertices: []f32, normalize: bool = true) -> []f32 {
 		// NOTE: Take a cross product from two vectors
 		// The first vector is the first vertex to the second
 		// The second vector is the second vertex to the third
+		// The cross product thus will face away from both components of the triangle,
+		// thus tangent and away from the face.
 		base_idx := i * 9
 		vAB: [3]f32 = {
 			vertices[base_idx + 3] - vertices[base_idx + 0],
@@ -150,7 +157,7 @@ make_normals :: proc(vertices: []f32, normalize: bool = true) -> []f32 {
 		if (normalize) {
 			cross_vec = linalg.vector_normalize0(cross_vec)
 		}
-		// TODO: Do we really need to send three identical data points to the GPU? Case for indexing?
+		// TODO: Indexing?
 		normals[base_idx] = cross_vec[0]
 		normals[base_idx + 3] = cross_vec[0]
 		normals[base_idx + 6] = cross_vec[0]
@@ -164,6 +171,13 @@ make_normals :: proc(vertices: []f32, normalize: bool = true) -> []f32 {
 
 	return normals
 }
+
+// NOTE: Some test code is below, helping to exercise the normal calculations.
+// The normals are computed on the CPU, since the GPU is intended for parallel computation,
+// but the computation of the normals requires understanding the vertices in chunks.
+// TODO: Move the below test code to their own file.
+// TODO: How would one accelerate this on the CPU? Normals could be broken into chunks and
+// the computation need not be sequential - is this optimized already by the compiler?
 
 @(test)
 test_normal_computations_basic :: proc(t: ^testing.T) {
@@ -236,6 +250,12 @@ test_normal_computations_normalization_off :: proc(t: ^testing.T) {
 
 }
 
+// NOTE: The normal matrix is the matrix which transforms the normals of an object, which does
+// not use the same rules as the positions. Namely,
+// The normal vectors ought not to be translated, as normals simply reflect a direction, and 
+// intermediary computations on this direction should simply rotate them.
+// There are more complex models but - the inverse transpose of the model and view matrices works
+// under some assumptions. We are using that for now.
 make_normal_matrix :: proc(model: matrix[4, 4]f32, cam: matrix[4, 4]f32) -> matrix[4, 4]f32 {
 	mat3 :: distinct matrix[3, 3]f32
 	mat4 :: distinct matrix[4, 4]f32
@@ -273,6 +293,8 @@ HaltPrintingMessage :: proc(message: string, source: HaltingErrorSource = .UNKNO
 }
 
 // MARK: Configuration
+// NOTE: The configuration represents the loaded settings at the launch of the game, or to be persisted
+// to disk. It should be abstracted from the present state of the engine.
 Configuration :: struct {
 	resolution: struct {
 		window_height: uint,
@@ -280,6 +302,14 @@ Configuration :: struct {
 	},
 }
 
+// MARK: Engine State
+// NOTE: The engine state is the root data structure of the application, storing necessary properties. This
+// would likely be broken out as the engine evolves or is rewritten. It loads initial state based on the
+// configuration, stores relevant data during setup, and reads/writes to the state over the course of the
+// game. 
+// For this prototyping, synchronization is not implemented. If a version of the engine were to be made with
+// multiple threads, breaking various subsystems sensibly would be advisable to avoid multiple threads mutating
+// the same state.
 EngineState :: struct {
 	resolution:        struct {
 		h: i32,
@@ -294,24 +324,12 @@ EngineState :: struct {
 }
 
 // MARK: Mesh Management
-
-// Lots of unknowns here. Seems we are intended to submit meshes once and then do point updates on necessary metadata.
-// Given this, we probably want to be able to submit meshes and load/unload them at will.
-// We also need to associate a model-to-world space conversion.
-// In a proper engine this is probably hierarchical in a tree - let's KISS and keep a one-level flat hierarchy for now
-// will need a tree if/when we use this to render other objects (e.g., enemies)
-
-Scene :: struct {
-	gpu:           ^sdl3.GPUDevice,
-	active_meshes: [dynamic]ActiveMesh,
-}
-
-SceneInit :: proc(gpu: ^sdl3.GPUDevice) -> Scene {
-	return Scene{gpu = gpu, active_meshes = {}}
-}
-
+// Represents a mesh actively loaded into the scene. Some data is preserved for general use on the CPU, or for debugging.
+// Otherwise, the main pieces are the model-to-world matrix to mutate the world space position and retain ability to
+// transform the entity, the vertex counts for the draw call, and of course the reference to the GPU buffers which hold
+// the mesh data(s)
 ActiveMesh :: struct {
-	// TODO: Does this need a generation? or can we get away with just throwing meshes into the scene arbitrarily?
+	// TODO: Will this need a generational index when we eventually evolve to submission and removal of meshes?
 	gpu_buffer:         ^sdl3.GPUBuffer,
 	normals_gpu_buffer: ^sdl3.GPUBuffer,
 	model_to_world_mat: matrix[4, 4]f32,
@@ -320,6 +338,15 @@ ActiveMesh :: struct {
 }
 
 // TODO: Make this attach to the Scene, or ditch the Scene concept for the prototype.
+// It seems unlikely that we would need to load/unload distinct scenes in the prototype - and more likely that we can
+// get away with a bundle of global state, so storing in the State should be relatively safe.
+// In a more complete engine, we would probably have different scenes.
+// NOTE: The registration of meshes has the following responsibilities, presently:
+// 1. Submit the mesh vertices to the GPU. This will be stored in a GPUBuffer.
+// 2. Create a transfer buffer for transferring data from the CPU to the GPU buffer.
+// 3. Map the transfer buffer and copy the data.
+// Since we are not updating the mesh data other than once, we do not currently make use of SDL's cycling. This may change
+// under different usage scenarios.
 @(require_results)
 StateRegisterMesh :: proc(
 	state: ^EngineState,
@@ -338,6 +365,7 @@ StateRegisterMesh :: proc(
 	assert(len(normals) == len(vertices), "Number of normals does not match len(vertices)")
 
 	// MARK: Create the GPU buffer
+	log.debug("Creating GPU buffer for mesh vertex data...")
 	buffer_create_info := sdl3.GPUBufferCreateInfo {
 		usage = sdl3.GPUBufferUsageFlags{.VERTEX},
 		size  = u32(size_of(f32) * len(vertices)),
@@ -351,6 +379,9 @@ StateRegisterMesh :: proc(
 		ok = false
 		return
 	}
+	log.debug("Vertex GPU buffer created.")
+
+	log.debug("Creating GPU buffer for mesh normals data...")
 	normal_buffer_create_info := sdl3.GPUBufferCreateInfo {
 		usage = sdl3.GPUBufferUsageFlags{.VERTEX},
 		size  = u32(size_of(f32) * len(normals)),
@@ -364,10 +395,12 @@ StateRegisterMesh :: proc(
 		ok = false
 		return
 	}
+	log.debug("Normals GPU buffer created.")
 
 	// Transfer the data into the buffer
 	// We do not cycle what is in this buffer, so cycling does not matter yet.
 	// We should revisit this... can we reuse a fixed number of GPU buffers for chunks and utilize cycling?
+	log.debug("Creating GPU transfer buffer for mesh vertex data...")
 	transfer_buffer_create_info := sdl3.GPUTransferBufferCreateInfo {
 		usage = .UPLOAD,
 		size  = u32(size_of(f32) * len(vertices)),
@@ -377,8 +410,14 @@ StateRegisterMesh :: proc(
 		ok = false
 		return
 	}
-	defer {sdl3.ReleaseGPUTransferBuffer(state.gpu, transfer_buffer)}
+	log.debug("Vertex GPU transfer buffer created.")
+	defer {
+		log.debug("Releasing GPU vertex transfer buffer.")
+		sdl3.ReleaseGPUTransferBuffer(state.gpu, transfer_buffer)
+		log.debug("GPU vertex transfer buffer released.")
+	}
 
+	log.debug("Creating GPU transfer buffer for mesh normals data...")
 	normals_transfer_buffer_create_info := sdl3.GPUTransferBufferCreateInfo {
 		usage = .UPLOAD,
 		size  = u32(size_of(f32) * len(normals)),
@@ -388,35 +427,58 @@ StateRegisterMesh :: proc(
 		normals_transfer_buffer_create_info,
 	)
 	if normals_transfer_buffer == nil {
+		log.errorf("Could not create normals transfer buffer due to SDL error %v", sdl3.GetError())
 		ok = false
 		return
 	}
-	defer {sdl3.ReleaseGPUTransferBuffer(state.gpu, normals_transfer_buffer)}
+	log.debug("Mesh normals GPU transfer buffer created.")
+	defer {
+		log.debug("Releasing GPU mesh normals transfer buffer...")
+		sdl3.ReleaseGPUTransferBuffer(state.gpu, normals_transfer_buffer)
+		log.debug("GPU mesh normals transfer buffer released.")
+	}
 
+	log.debug("Mapping vertex GPU transfer buffer to CPU.")
 	transfer_map_loc := sdl3.MapGPUTransferBuffer(state.gpu, transfer_buffer, false)
 	if transfer_map_loc == nil {
+		log.errorf("Could not map GPU transfer buffer due to SDL error %v", sdl3.GetError())
 		ok = false
 		return
 	}
+	log.debug("Vertex GPU transfer buffer mapped. Copying...")
 	mem.copy(transfer_map_loc, raw_data(vertices), len(vertices) * size_of(f32))
+	log.debug("Vertex GPU transfer buffer copied.")
 
+	log.debug("Mapping normals GPU transfer buffer to CPU.")
 	normals_transfer_map_loc := sdl3.MapGPUTransferBuffer(
 		state.gpu,
 		normals_transfer_buffer,
 		false,
 	)
 	if normals_transfer_map_loc == nil {
+		log.errorf(
+			"Could not map normals GPU transfer buffer due to SDL error %v",
+			sdl3.GetError(),
+		)
 		ok = false
 		return
 	}
+	log.debug("Normals GPU transfer buffer mapped. Copying...")
 	mem.copy(normals_transfer_map_loc, raw_data(normals), len(normals) * size_of(f32))
+	log.debug("Normals GPU transfer buffer copied.")
 
 	// Create a command buffer for submitting the copy
+	log.debug("Creating command buffer for mesh data copy")
 	command_buffer := sdl3.AcquireGPUCommandBuffer(state.gpu)
 	if command_buffer == nil {
+		log.errorf(
+			"Could not create command buffer for mesh data copy due to SDL error %v",
+			sdl3.GetError(),
+		)
 		ok = false
 		return
 	}
+	log.debug("Mesh data copied.")
 	copy_pass := sdl3.BeginGPUCopyPass(command_buffer)
 	transfer_buffer_loc := sdl3.GPUTransferBufferLocation {
 		transfer_buffer = transfer_buffer,
@@ -448,9 +510,14 @@ StateRegisterMesh :: proc(
 
 	submit_success := sdl3.SubmitGPUCommandBuffer(command_buffer)
 	if !submit_success {
+		log.errorf(
+			"Could not submit copy pass command buffer due to SDL error %v",
+			sdl3.GetError(),
+		)
 		ok = false
 		return
 	}
+	log.debug("Copy pass submitted. Returning mesh.")
 
 	active_mesh := ActiveMesh {
 		gpu_buffer         = buffer,
@@ -465,17 +532,24 @@ StateRegisterMesh :: proc(
 // TODO: SceneDeleteMesh
 
 // MARK: Rendering
+// NOTE: Performs the frame drawing logic. Should be ran at the maximal desired framerate.
+// General responsibilities include:
+// 1. Obtaining the swapchain texture for the frame.
+// 2. Specifying the swapchain texture as the target for drawing.
+// 3. Binding to the graphics pipeline we set up at the beginning of the program.
+// 4. Specifying our viewport as the window
+// 5. Computing the matrix data
+// 6. Rendering.
+// TODO: draw_frame should be generic over the registered meshes, and should not be hardcoded
+// for a single registered mesh.
 draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
-	log.debug("Acquiring command buffer for frame")
 	gpu_command_buffer := sdl3.AcquireGPUCommandBuffer(state.gpu)
 	if (gpu_command_buffer == nil) {
 		HaltPrintingMessage("Command buffer acquisition failed.", source = .SDL)
 	}
-	log.debug("Command buffer acquired.")
 
 	// NOTE: Swapchain texture acquisition managed by SDL3 - should not free this texture
 	// See: https://wiki.libsdl.org/SDL3/SDL_WaitAndAcquireGPUSwapchainTexture#remarks
-	log.debug("Acquiring swapchain texture for command buffer")
 	swapchain_tex: ^sdl3.GPUTexture
 	swapchain_tex_width: ^u32
 	swapchain_tex_height: ^u32
@@ -489,9 +563,7 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 	if !swapchain_tex_success {
 		HaltPrintingMessage("Failed to acquire GPU swapchain texture.", source = .SDL)
 	}
-	log.debug("Swapchain texture acquired.")
 
-	log.debug("Executing render pass.")
 	gpu_color_targets := []sdl3.GPUColorTargetInfo {
 		{
 			texture = swapchain_tex,
@@ -542,7 +614,6 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 		20,
 		// NOTE: vFOV currently hack from 90 deg hFOV on 16:9 via below calculator.
 		// https://themetalmuncher.github.io/fov-calc/
-		// TODO: Validate above, and figure out the math!
 		47,
 		f32(state.resolution.w),
 		f32(state.resolution.h),
@@ -562,29 +633,10 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 		raw_data(&normal_matrix),
 		size_of(normal_matrix),
 	)
-	// FIXME: Remove this debug log
-	/*
-	debug_verts := make([]f32, test_mesh.vertex_count, context.temp_allocator)
-	for i in 0 ..< (test_mesh.vertex_count / 3) {
-		vec: [3]f32 = {
-			test_mesh.normals[i * 3],
-			test_mesh.normals[i * 3 + 1],
-			test_mesh.normals[i * 3 + 2],
-		}
-		transformed := normal_matrix * vec
-		debug_verts[i * 3] = transformed[0]
-		debug_verts[i * 3 + 1] = transformed[1]
-		debug_verts[i * 3 + 2] = transformed[2]
-	}
-	log.debugf("transformed normals %v", debug_verts)
-	*/
 	sdl3.DrawGPUPrimitives(gpu_render_pass, test_mesh.vertex_count, 1, 0, 0)
-	log.debug("Do we make it here?")
 	log.debugf("%v", test_mesh.vertex_count)
 	sdl3.EndGPURenderPass(gpu_render_pass)
-	log.debug("Render pass executed.")
 
-	log.debug("Submitting command buffer.")
 	gpu_command_buffer_submit_success := sdl3.SubmitGPUCommandBuffer(gpu_command_buffer)
 	if !gpu_command_buffer_submit_success {
 		HaltPrintingMessage("Submission of command buffer to GPU failed.", source = .SDL)
@@ -594,6 +646,7 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 // MARK: Test Scene
 
 // NOTE: Praise the cube!
+// Registers a cube mesh into the scene.
 register_test_mesh :: proc(state: ^EngineState) {
 	TEST_MESH_VERTICES: []f32 = {
 		// Front L
@@ -720,6 +773,7 @@ register_test_mesh :: proc(state: ^EngineState) {
 	test_mesh_normals := make_normals(TEST_MESH_VERTICES)
 	log.debugf("mesh normals: %v", test_mesh_normals)
 
+	// Translate to (0, 0, 4) in world space.
 	model_to_world_matrix := matrix[4, 4]f32{
 		1.0, 0.0, 0.0, 0.0, 
 		0.0, 1.0, 0.0, 0.0, 
@@ -727,6 +781,7 @@ register_test_mesh :: proc(state: ^EngineState) {
 		0.0, 0.0, 0.0, 1.0, 
 	}
 
+	log.debug("Submitting test mesh using StateRegisterMesh")
 	mesh, ok := StateRegisterMesh(
 		state,
 		TEST_MESH_VERTICES,
@@ -736,6 +791,7 @@ register_test_mesh :: proc(state: ^EngineState) {
 	if (!ok) {
 		HaltPrintingMessage("Could not register test mesh due to SDL error", source = .SDL)
 	}
+	log.debug("Test mesh submitted.")
 
 	state.test_mesh = mesh
 }
@@ -745,6 +801,7 @@ register_test_mesh :: proc(state: ^EngineState) {
 main :: proc() {
 	// MARK: Tracking Allocator boilerplate
 	// https://gist.github.com/karl-zylinski/4ccf438337123e7c8994df3b03604e33
+	// In theory this will indicate bad allocations... though we presently have some and this isn't telling me anything yet.
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, context.allocator)
@@ -788,13 +845,17 @@ main :: proc() {
 		configuration.resolution.window_height,
 	)
 
+	log.debug("Obtaining executable path")
 	// Get program executable directory 
 	proc_info, proc_info_err := os2.current_process_info(
 		os2.Process_Info_Fields{.Executable_Path},
 		allocator = context.temp_allocator,
 	)
 	if proc_info_err != nil {
-		HaltPrintingMessage("Unexpected error fetching process info. Quitting.", source = .CUSTOM)
+		HaltPrintingMessage(
+			"Unexpected error fetching executable path. Quitting.",
+			source = .CUSTOM,
+		)
 	}
 
 	prog_path := strings.clone(proc_info.executable_path)
@@ -809,7 +870,6 @@ main :: proc() {
 
 	// Enable Vulkan Validation Hints
 	sdl3.SetHint("SDL_RENDER_VULKAN_DEBUG", "1")
-	log.debug("Vulkan Validation Layers are ACTIVE")
 
 	// initialize SDL3 window
 	main_window := sdl3.CreateWindow(
@@ -944,10 +1004,11 @@ main :: proc() {
 		target_info = sdl3.GPUGraphicsPipelineTargetInfo {
 			color_target_descriptions = raw_data(
 				[]sdl3.GPUColorTargetDescription {
+					// TODO: Does this work on other platforms (e.g., macOS?)
 					sdl3.GPUColorTargetDescription{format = sdl3.GPUTextureFormat.B8G8R8A8_UNORM},
 				},
 			),
-			num_color_targets = 1,
+			num_color_targets         = 1,
 		},
 	}
 	graphics_pipeline := sdl3.CreateGPUGraphicsPipeline(gpu, graphics_pipeline_create_info)
@@ -967,10 +1028,11 @@ main :: proc() {
 		should_process_event := sdl3.PollEvent(&event)
 		if (should_process_event) {
 			if event.type == .QUIT {
+				log.debug("Quit event received")
 				should_keep_running = false
 			}
 			if event.type == .WINDOW_RESIZED || event.type == .WINDOW_PIXEL_SIZE_CHANGED {
-				// TODO: Reset any relevant GPU state here
+				log.debug("Window resize event received. Updating state.")
 
 				// MARK: Update properties from window
 				w: i32
