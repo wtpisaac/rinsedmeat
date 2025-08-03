@@ -1023,7 +1023,7 @@ main :: proc() {
 		},
 	}
 	// Logging
-	context.logger = log.create_console_logger(allocator = context.temp_allocator)
+	context.logger = log.create_console_logger()
 	log.info("rinsedmeat - engine demo created by Isaac Trimble-Pederson")
 
 	log.infof(
@@ -1036,7 +1036,7 @@ main :: proc() {
 	// Get program executable directory 
 	proc_info, proc_info_err := os2.current_process_info(
 		os2.Process_Info_Fields{.Executable_Path},
-		allocator = context.temp_allocator,
+		allocator = context.allocator,
 	)
 	if proc_info_err != nil {
 		HaltPrintingMessage(
@@ -1046,7 +1046,7 @@ main :: proc() {
 	}
 
 	prog_path := strings.clone(proc_info.executable_path)
-	os2.free_process_info(proc_info, allocator = context.temp_allocator)
+	os2.free_process_info(proc_info, context.allocator)
 	prog_dir := filepath.dir(prog_path)
 
 	// initialize SDL window
@@ -1303,7 +1303,7 @@ main :: proc() {
 		draw_frame(state, main_window)
 
 		// Clear allocator at end of frame
-		// free_all(context.temp_allocator)
+		free_all(context.temp_allocator)
 	}
 
 	log.info("Engine shutdown complete!")
