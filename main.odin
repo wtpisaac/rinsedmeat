@@ -488,7 +488,8 @@ EngineState :: struct {
 		w: i32,
 	},
 	camera:            CameraState,
-	test_mesh:         Maybe(ActiveMesh),
+	meshes:            [dynamic]ActiveMesh,
+	meshes_live:       [dynamic]bool,
 	// MARK: SDL3 GPU (Device, Shaders, etc.)
 	gpu:               ^sdl3.GPUDevice,
 	vertex_shader:     ^sdl3.GPUShader,
@@ -503,11 +504,11 @@ EngineState :: struct {
 // the mesh data(s)
 ActiveMesh :: struct {
 	// TODO: Will this need a generational index when we eventually evolve to submission and removal of meshes?
+	live:               bool,
 	gpu_buffer:         ^sdl3.GPUBuffer,
 	normals_gpu_buffer: ^sdl3.GPUBuffer,
 	model_to_world_mat: matrix[4, 4]f32,
 	vertex_count:       u32,
-	normals:            []f32,
 }
 
 // TODO: Make this attach to the Scene, or ditch the Scene concept for the prototype.
@@ -536,6 +537,11 @@ StateRegisterMesh :: proc(
 		"Provided vertex buffer failed modulo 9 check; must provide full triangles with 3-dim coordinates.",
 	)
 	assert(len(normals) == len(vertices), "Number of normals does not match len(vertices)")
+
+	assert(
+		len(state.meshes_live) == len(state.meshes),
+		"Mesh bool list length out of sync with mesh data; structure corrupt",
+	)
 
 	// MARK: Create the GPU buffer
 	log.debug("Creating GPU buffer for mesh vertex data...")
@@ -693,12 +699,32 @@ StateRegisterMesh :: proc(
 	log.debug("Copy pass submitted. Returning mesh.")
 
 	active_mesh := ActiveMesh {
+		live               = true,
 		gpu_buffer         = buffer,
 		normals_gpu_buffer = normal_buffer,
 		model_to_world_mat = model_to_world_mat,
 		vertex_count       = u32(len(vertices) / 3),
-		normals            = normals,
 	}
+
+	// Find a slot to insert this active mesh.
+	mesh_slot_count := len(state.meshes_live)
+	i := 0
+	for i = 0; i < mesh_slot_count; i += 1 {
+		if !state.meshes_live[i] {break}
+	}
+	// Two possible cases:
+	// 1. i exceeds current length -> append
+	// 2. i is less than current length -> free slot, replace
+	if i < mesh_slot_count {
+		// Case 1
+		state.meshes[i] = active_mesh
+		state.meshes_live[i] = true
+	} else {
+		// Case 2
+		append(&state.meshes, active_mesh)
+		append(&state.meshes_live, true)
+	}
+
 	return active_mesh, true
 }
 
@@ -745,8 +771,6 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 			store_op = sdl3.GPUStoreOp.STORE,
 		},
 	}
-
-	// MARK: Render Pass
 	gpu_render_pass := sdl3.BeginGPURenderPass(
 		gpu_command_buffer,
 		raw_data(gpu_color_targets),
@@ -768,49 +792,54 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 		},
 	)
 
-	// FIXME: Move off test mesh into generalizable logic
-	test_mesh := state.test_mesh.?
+	for mesh in state.meshes {
+		// Do not render meshes marked as dead.
+		// This should be OK if we make aggressive use of slots... probably OK
+		if !mesh.live {continue}
 
-	sdl3.BindGPUVertexBuffers(
-		gpu_render_pass,
-		0, // TODO: Check slot
-		raw_data(
-			[]sdl3.GPUBufferBinding {
-				sdl3.GPUBufferBinding{buffer = test_mesh.gpu_buffer, offset = 0},
-				sdl3.GPUBufferBinding{buffer = test_mesh.normals_gpu_buffer, offset = 0},
-			},
-		),
-		2,
-	)
-	perspective_matrix := make_perspective_matrix(
-		1.0,
-		20,
-		// NOTE: vFOV currently hack from 90 deg hFOV on 16:9 via below calculator.
-		// https://themetalmuncher.github.io/fov-calc/
-		47,
-		f32(state.resolution.w),
-		f32(state.resolution.h),
-	)
-	log.debugf("perspective matrix: %v", perspective_matrix)
-	camera_matrix := make_camera_matrix(
-		state.camera.position,
-		state.camera.rotation.y,
-		state.camera.rotation.x,
-	)
-	log.debugf("camera matrix: %v", camera_matrix)
-	mvp := perspective_matrix * camera_matrix * test_mesh.model_to_world_mat
-	sdl3.PushGPUVertexUniformData(gpu_command_buffer, 0, raw_data(&mvp), size_of(mvp))
+		sdl3.BindGPUVertexBuffers(
+			gpu_render_pass,
+			0, // TODO: Check slot
+			raw_data(
+				[]sdl3.GPUBufferBinding {
+					sdl3.GPUBufferBinding{buffer = mesh.gpu_buffer, offset = 0},
+					sdl3.GPUBufferBinding{buffer = mesh.normals_gpu_buffer, offset = 0},
+				},
+			),
+			2,
+		)
+		perspective_matrix := make_perspective_matrix(
+			1.0,
+			20,
+			// NOTE: vFOV currently hack from 90 deg hFOV on 16:9 via below calculator.
+			// https://themetalmuncher.github.io/fov-calc/
+			47,
+			f32(state.resolution.w),
+			f32(state.resolution.h),
+		)
+		log.debugf("perspective matrix: %v", perspective_matrix)
+		camera_matrix := make_camera_matrix(
+			state.camera.position,
+			state.camera.rotation.y,
+			state.camera.rotation.x,
+		)
+		log.debugf("camera matrix: %v", camera_matrix)
+		mvp := perspective_matrix * camera_matrix * mesh.model_to_world_mat
+		sdl3.PushGPUVertexUniformData(gpu_command_buffer, 0, raw_data(&mvp), size_of(mvp))
 
-	normal_matrix := make_normal_matrix(test_mesh.model_to_world_mat, camera_matrix)
-	log.debugf("normal matrix: %v", normal_matrix)
-	sdl3.PushGPUVertexUniformData(
-		gpu_command_buffer,
-		1,
-		raw_data(&normal_matrix),
-		size_of(normal_matrix),
-	)
-	sdl3.DrawGPUPrimitives(gpu_render_pass, test_mesh.vertex_count, 1, 0, 0)
-	log.debugf("%v", test_mesh.vertex_count)
+		normal_matrix := make_normal_matrix(mesh.model_to_world_mat, camera_matrix)
+		log.debugf("normal matrix: %v", normal_matrix)
+		sdl3.PushGPUVertexUniformData(
+			gpu_command_buffer,
+			1,
+			raw_data(&normal_matrix),
+			size_of(normal_matrix),
+		)
+		sdl3.DrawGPUPrimitives(gpu_render_pass, mesh.vertex_count, 1, 0, 0)
+		log.debugf("%v", mesh.vertex_count)
+
+	}
+
 	sdl3.EndGPURenderPass(gpu_render_pass)
 
 	gpu_command_buffer_submit_success := sdl3.SubmitGPUCommandBuffer(gpu_command_buffer)
@@ -823,7 +852,7 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 
 // NOTE: Praise the cube!
 // Registers a cube mesh into the scene.
-register_test_mesh :: proc(state: ^EngineState) {
+register_test_mesh :: proc(state: ^EngineState, position: [3]f32) {
 	TEST_MESH_VERTICES: []f32 = {
 		// Front L
 		-0.5,
@@ -951,9 +980,9 @@ register_test_mesh :: proc(state: ^EngineState) {
 
 	// Translate to (0, 0, 4) in world space.
 	model_to_world_matrix := matrix[4, 4]f32{
-		1.0, 0.0, 0.0, 0.0, 
-		0.0, 1.0, 0.0, 0.0, 
-		0.0, 0.0, 1.0, 4.0, 
+		1.0, 0.0, 0.0, position.x, 
+		0.0, 1.0, 0.0, position.y, 
+		0.0, 0.0, 1.0, position.z, 
 		0.0, 0.0, 0.0, 1.0, 
 	}
 
@@ -968,8 +997,6 @@ register_test_mesh :: proc(state: ^EngineState) {
 		HaltPrintingMessage("Could not register test mesh due to SDL error", source = .SDL)
 	}
 	log.debug("Test mesh submitted.")
-
-	state.test_mesh = mesh
 }
 
 // MARK: Event Filter
@@ -1206,7 +1233,11 @@ main :: proc() {
 	log.debug("Graphics pipeline created.")
 
 	// MARK: Test Mesh Registration
-	register_test_mesh(&state)
+	register_test_mesh(&state, {0, 0, 4})
+	// WARN:: Depth testing isn't configured because we don't bind a depth stencil texture.
+	// It seems Mr. Claude was correct.
+	// Thus, the below line causes multiple cubes to render... need to fix... but submission works.
+	// register_test_mesh(&state, {0, 0, 8})
 
 	mouse_rel_ok := sdl3.SetWindowRelativeMouseMode(main_window, true)
 	if !mouse_rel_ok {
