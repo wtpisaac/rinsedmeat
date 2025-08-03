@@ -972,6 +972,16 @@ register_test_mesh :: proc(state: ^EngineState) {
 	state.test_mesh = mesh
 }
 
+// MARK: Event Filter
+// NOTE: Currently used solely to remove mouse motion events, to avoid queue saturation.
+event_filter :: proc "c" (user_data: rawptr, event: ^sdl3.Event) -> bool {
+	#partial switch event.type {
+	case .MOUSE_MOTION:
+		return false
+	case:
+		return true
+	}
+}
 
 // MARK: Main Loop
 
@@ -1211,11 +1221,13 @@ main :: proc() {
 	}
 
 	// MARK: Event Loop
+	sdl3.SetEventFilter(event_filter, nil)
 	should_keep_running := true
 	for should_keep_running {
 		event: sdl3.Event
 		should_process_event := sdl3.PollEvent(&event)
 		if (should_process_event) {
+			defer {should_process_event = sdl3.PollEvent(&event)}
 			if event.type == .QUIT {
 				log.debug("Quit event received")
 				should_keep_running = false
@@ -1235,34 +1247,6 @@ main :: proc() {
 				state.resolution.h = h
 				state.resolution.w = w
 			}
-			// TODO: Expand this mouse handling!
-			if event.type == .MOUSE_MOTION {
-				dx: f32
-				dy: f32
-				flags := sdl3.GetRelativeMouseState(&dx, &dy)
-
-				log.debugf("dx %v", dx)
-				log.debugf("dy %v", dy)
-
-				// NOTE: Swap x, y
-				// Horizontal movement should be an *x-axis* rotation
-				// Vertical movement should be a *y-axis* rotation
-				// Screen x, y inverted from the desired rotation axis
-				normalized_dx := (dy * 10) / (f32(state.resolution.w))
-				normalized_dy := (dx * 10) / (f32(state.resolution.h))
-
-				// NOTE: Camera should be able to move up and down [-90deg, 90deg]; clamp
-				// Camera should be able to spin around endlessly, wrap
-				// We use these to prevent these values from becoming very large over time,
-				// causing precision loss
-				state.camera.rotation.x = clamp(state.camera.rotation.x + normalized_dx, -90, 90)
-				state.camera.rotation.y = math.wrap(state.camera.rotation.y + normalized_dy, 360)
-				log.debugf(
-					"camera rot: x %v y %v",
-					state.camera.rotation.x,
-					state.camera.rotation.y,
-				)
-			}
 			// MARK: Camera Movement
 			// TODO: This will eventually need to be a more sophisticated system intended to do
 			// checks for collisions, gravity, etc.
@@ -1278,7 +1262,32 @@ main :: proc() {
 					log.debugf("mov: %v", state.camera.movement)
 				}
 			}
+
 		}
+		// MARK: Camera mouse movement
+		// HACK: We run this out of the event queue, as mouse motion saturates the queue. This is probably
+		// a hack, and should be considered more carefully in a full engine.
+		dx: f32
+		dy: f32
+		flags := sdl3.GetRelativeMouseState(&dx, &dy)
+
+		log.debugf("dx %v", dx)
+		log.debugf("dy %v", dy)
+
+		// NOTE: Swap x, y
+		// Horizontal movement should be an *x-axis* rotation
+		// Vertical movement should be a *y-axis* rotation
+		// Screen x, y inverted from the desired rotation axis
+		normalized_dx := (dy * 10) / (f32(state.resolution.w))
+		normalized_dy := (dx * 10) / (f32(state.resolution.h))
+
+		// NOTE: Camera should be able to move up and down [-90deg, 90deg]; clamp
+		// Camera should be able to spin around endlessly, wrap
+		// We use these to prevent these values from becoming very large over time,
+		// causing precision loss
+		state.camera.rotation.x = clamp(state.camera.rotation.x + normalized_dx, -90, 90)
+		state.camera.rotation.y = math.wrap(state.camera.rotation.y + normalized_dy, 360)
+		log.debugf("camera rot: x %v y %v", state.camera.rotation.x, state.camera.rotation.y)
 
 		primitives.EWMADt_record_tick(&dt)
 		dt_f := primitives.EWMADt_retrieve_millis(&dt)
