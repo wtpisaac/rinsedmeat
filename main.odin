@@ -160,111 +160,39 @@ camera_offset_to_world_offset :: proc(cam_y_rot_deg: f32, offset: [3]f32) -> [3]
 }
 
 // MARK: Player Movement
-// TODO: We will need the movement to be performed relative to the camera's local coordinate space,
-// then after computing the local transformation, bring that into world space with the relevant matrix.
-// This should not affect this particular state machine only focusing on direct movement controls.
 // TODO: This naming is fucking terrible... redo it
-PlayerMovement :: distinct [3]PlayerAxisMovementState
-
-PlayerMovementAxis :: enum {
-	HORIZONTAL,
-	VERTICAL,
-	DEPTHWISE,
-}
-
-PlayerMovementEventStatus :: enum {
-	BEGAN,
-	ENDED,
-}
+PlayerMovement :: distinct [3]PlayerAxisMovement
 
 // NOTE: STILL case should not be used in movement events.
-PlayerAxisMovementState :: enum {
+PlayerAxisMovement :: enum {
 	STILL,
 	POSITIVE, // up, right, forward
 	NEGATIVE, // down, left, backward
 }
 
-PlayerMovementEvent :: struct {
-	axis:   PlayerMovementAxis,
-	state:  PlayerAxisMovementState,
-	status: PlayerMovementEventStatus,
+map_keyboard_to_player_movement :: proc(
+	incoming_codes: [^]bool,
+	incoming_mod_state: sdl3.Keymod,
+) -> PlayerMovement {
+	is_w := incoming_codes[sdl3.Scancode.W]
+	is_s := incoming_codes[sdl3.Scancode.S]
+	is_a := incoming_codes[sdl3.Scancode.A]
+	is_d := incoming_codes[sdl3.Scancode.D]
+	is_spc := incoming_codes[sdl3.Scancode.SPACE]
+	is_shift: bool = .LSHIFT in incoming_mod_state
+
+	new_movement: PlayerMovement = {}
+	if is_w {new_movement.z = .POSITIVE}
+	if is_s {new_movement.z = .NEGATIVE}
+	if is_a {new_movement.x = .NEGATIVE}
+	if is_d {new_movement.x = .POSITIVE}
+	if is_spc {new_movement.y = .POSITIVE}
+	if is_shift {new_movement.y = .NEGATIVE}
+
+	return new_movement
 }
 
-process_movement_event :: proc(movement: ^PlayerMovement, event: PlayerMovementEvent) {
-	assert(event.state != .STILL, "Should not submit a STILL event; this is meaningless.")
-
-	axis_ptr: ^PlayerAxisMovementState
-	switch event.axis {
-	case .HORIZONTAL:
-		axis_ptr = &movement.x
-	case .VERTICAL:
-		axis_ptr = &movement.y
-	case .DEPTHWISE:
-		axis_ptr = &movement.z
-	}
-
-	if event.status == .BEGAN {
-		axis_ptr^ = event.state
-	}
-	if event.status == .ENDED && axis_ptr^ == event.state {
-		axis_ptr^ = .STILL
-	}
-}
-
-movement_event_for_keyboard_event :: proc(
-	event: sdl3.KeyboardEvent,
-) -> Maybe(PlayerMovementEvent) {
-	if !(event.type == .KEY_UP || event.type == .KEY_DOWN) {
-		return nil
-	}
-	if !(event.scancode == .W ||
-		   event.scancode == .S ||
-		   event.scancode == .A ||
-		   event.scancode == .D ||
-		   event.scancode == .LSHIFT ||
-		   event.scancode == .SPACE) {
-		return nil
-	}
-
-	movement_status: PlayerMovementEventStatus
-	#partial switch event.type {
-	case .KEY_UP:
-		movement_status = .ENDED
-	case .KEY_DOWN:
-		movement_status = .BEGAN
-	}
-
-	movement_axis: PlayerMovementAxis
-	movement_state: PlayerAxisMovementState
-	#partial switch event.scancode {
-	case .W:
-		movement_axis = .DEPTHWISE
-		movement_state = .POSITIVE
-	case .S:
-		movement_axis = .DEPTHWISE
-		movement_state = .NEGATIVE
-	case .A:
-		movement_axis = .HORIZONTAL
-		movement_state = .NEGATIVE
-	case .D:
-		movement_axis = .HORIZONTAL
-		movement_state = .POSITIVE
-	case .LSHIFT:
-		movement_axis = .VERTICAL
-		movement_state = .NEGATIVE
-	case .SPACE:
-		movement_axis = .VERTICAL
-		movement_state = .POSITIVE
-	}
-
-	return PlayerMovementEvent {
-		status = movement_status,
-		axis = movement_axis,
-		state = movement_state,
-	}
-}
-
-num_for_state :: proc(state: PlayerAxisMovementState) -> f32 {
+num_for_state :: proc(state: PlayerAxisMovement) -> f32 {
 	n: f32
 	switch state {
 	case .STILL:
@@ -495,6 +423,7 @@ EngineState :: struct {
 	vertex_shader:     ^sdl3.GPUShader,
 	fragment_shader:   ^sdl3.GPUShader,
 	graphics_pipeline: ^sdl3.GPUGraphicsPipeline,
+	sdl_keystate:      [^]bool,
 }
 
 // MARK: Mesh Management
@@ -817,18 +746,15 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 			f32(state.resolution.w),
 			f32(state.resolution.h),
 		)
-		log.debugf("perspective matrix: %v", perspective_matrix)
 		camera_matrix := make_camera_matrix(
 			state.camera.position,
 			state.camera.rotation.y,
 			state.camera.rotation.x,
 		)
-		log.debugf("camera matrix: %v", camera_matrix)
 		mvp := perspective_matrix * camera_matrix * mesh.model_to_world_mat
 		sdl3.PushGPUVertexUniformData(gpu_command_buffer, 0, raw_data(&mvp), size_of(mvp))
 
 		normal_matrix := make_normal_matrix(mesh.model_to_world_mat, camera_matrix)
-		log.debugf("normal matrix: %v", normal_matrix)
 		sdl3.PushGPUVertexUniformData(
 			gpu_command_buffer,
 			1,
@@ -836,7 +762,6 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 			size_of(normal_matrix),
 		)
 		sdl3.DrawGPUPrimitives(gpu_render_pass, mesh.vertex_count, 1, 0, 0)
-		log.debugf("%v", mesh.vertex_count)
 
 	}
 
@@ -1003,7 +928,7 @@ register_test_mesh :: proc(state: ^EngineState, position: [3]f32) {
 // NOTE: Currently used solely to remove mouse motion events, to avoid queue saturation.
 event_filter :: proc "c" (user_data: rawptr, event: ^sdl3.Event) -> bool {
 	#partial switch event.type {
-	case .MOUSE_MOTION:
+	case .MOUSE_MOTION, .KEY_DOWN, .KEY_UP:
 		return false
 	case:
 		return true
@@ -1048,6 +973,7 @@ main :: proc() {
 			w = i32(configuration.resolution.window_width),
 			h = i32(configuration.resolution.window_height),
 		},
+		sdl_keystate = sdl3.GetKeyboardState(nil),
 	}
 	// Logging
 	context.logger = log.create_console_logger()
@@ -1278,32 +1204,20 @@ main :: proc() {
 				state.resolution.h = h
 				state.resolution.w = w
 			}
-			// MARK: Camera Movement
-			// TODO: This will eventually need to be a more sophisticated system intended to do
-			// checks for collisions, gravity, etc.
-			// For now, we simply have a noclip-capable camera that will directly map keybinds
-			// to position changes per frame.
-			if event.type == .KEY_DOWN || event.type == .KEY_UP {
-				keyboard_event := event.key
-				movement_event, is_movement_event := movement_event_for_keyboard_event(
-					keyboard_event,
-				).?
-				if is_movement_event {
-					process_movement_event(&state.camera.movement, movement_event)
-					log.debugf("mov: %v", state.camera.movement)
-				}
-			}
-
 		}
+		// MARK: Camera Keyboard Movement
+		keyboard_modstate := sdl3.GetModState()
+		state.camera.movement = map_keyboard_to_player_movement(
+			state.sdl_keystate,
+			keyboard_modstate,
+		)
+
 		// MARK: Camera mouse movement
 		// HACK: We run this out of the event queue, as mouse motion saturates the queue. This is probably
 		// a hack, and should be considered more carefully in a full engine.
 		dx: f32
 		dy: f32
 		flags := sdl3.GetRelativeMouseState(&dx, &dy)
-
-		log.debugf("dx %v", dx)
-		log.debugf("dy %v", dy)
 
 		// NOTE: Swap x, y
 		// Horizontal movement should be an *x-axis* rotation
@@ -1318,7 +1232,6 @@ main :: proc() {
 		// causing precision loss
 		state.camera.rotation.x = clamp(state.camera.rotation.x + normalized_dx, -90, 90)
 		state.camera.rotation.y = math.wrap(state.camera.rotation.y + normalized_dy, 360)
-		log.debugf("camera rot: x %v y %v", state.camera.rotation.x, state.camera.rotation.y)
 
 		primitives.EWMADt_record_tick(&dt)
 		dt_f := primitives.EWMADt_retrieve_millis(&dt)
