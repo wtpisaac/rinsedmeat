@@ -935,6 +935,72 @@ event_filter :: proc "c" (user_data: rawptr, event: ^sdl3.Event) -> bool {
 	}
 }
 
+// MARK: Graphics Pipeline
+create_graphics_pipeline :: proc(state: ^EngineState) {
+	// MARK: Create GPU graphics pipeline
+	log.debug("Creating graphics pipeline...")
+	graphics_pipeline_create_info := sdl3.GPUGraphicsPipelineCreateInfo {
+		vertex_shader = state.vertex_shader,
+		fragment_shader = state.fragment_shader,
+		vertex_input_state = sdl3.GPUVertexInputState {
+			vertex_buffer_descriptions = raw_data(
+				[]sdl3.GPUVertexBufferDescription {
+					sdl3.GPUVertexBufferDescription {
+						slot = 0,
+						pitch = 3 * size_of(f32),
+						input_rate = .VERTEX,
+					},
+					sdl3.GPUVertexBufferDescription {
+						slot = 1,
+						pitch = 3 * size_of(f32),
+						input_rate = .VERTEX,
+					},
+				},
+			),
+			num_vertex_buffers = 2,
+			vertex_attributes = raw_data(
+				[]sdl3.GPUVertexAttribute {
+					sdl3.GPUVertexAttribute {
+						location = 0,
+						buffer_slot = 0,
+						format = .FLOAT3,
+						offset = 0,
+					},
+					sdl3.GPUVertexAttribute {
+						location = 1,
+						buffer_slot = 1,
+						format = .FLOAT3,
+						offset = 0,
+					},
+				},
+			),
+			num_vertex_attributes = 2,
+		},
+		primitive_type = .TRIANGLELIST,
+		rasterizer_state = sdl3.GPURasterizerState {
+			fill_mode = .FILL,
+			cull_mode = .BACK,
+			front_face = .CLOCKWISE,
+			enable_depth_clip = true,
+		},
+		target_info = sdl3.GPUGraphicsPipelineTargetInfo {
+			color_target_descriptions = raw_data(
+				[]sdl3.GPUColorTargetDescription {
+					// TODO: Does this work on other platforms (e.g., macOS?)
+					sdl3.GPUColorTargetDescription{format = sdl3.GPUTextureFormat.B8G8R8A8_UNORM},
+				},
+			),
+			num_color_targets         = 1,
+		},
+	}
+	graphics_pipeline := sdl3.CreateGPUGraphicsPipeline(state.gpu, graphics_pipeline_create_info)
+	if graphics_pipeline == nil {
+		HaltPrintingMessage("Could not create graphics pipeline.", source = .SDL)
+	}
+	state.graphics_pipeline = graphics_pipeline
+	log.debug("Graphics pipeline created.")
+}
+
 // MARK: Main Loop
 
 main :: proc() {
@@ -1095,68 +1161,7 @@ main :: proc() {
 
 	log.debug("Shaders created!")
 
-	// MARK: Create GPU graphics pipeline
-	log.debug("Creating graphics pipeline...")
-	graphics_pipeline_create_info := sdl3.GPUGraphicsPipelineCreateInfo {
-		vertex_shader = vertex_shader,
-		fragment_shader = fragment_shader,
-		vertex_input_state = sdl3.GPUVertexInputState {
-			vertex_buffer_descriptions = raw_data(
-				[]sdl3.GPUVertexBufferDescription {
-					sdl3.GPUVertexBufferDescription {
-						slot = 0,
-						pitch = 3 * size_of(f32),
-						input_rate = .VERTEX,
-					},
-					sdl3.GPUVertexBufferDescription {
-						slot = 1,
-						pitch = 3 * size_of(f32),
-						input_rate = .VERTEX,
-					},
-				},
-			),
-			num_vertex_buffers = 2,
-			vertex_attributes = raw_data(
-				[]sdl3.GPUVertexAttribute {
-					sdl3.GPUVertexAttribute {
-						location = 0,
-						buffer_slot = 0,
-						format = .FLOAT3,
-						offset = 0,
-					},
-					sdl3.GPUVertexAttribute {
-						location = 1,
-						buffer_slot = 1,
-						format = .FLOAT3,
-						offset = 0,
-					},
-				},
-			),
-			num_vertex_attributes = 2,
-		},
-		primitive_type = .TRIANGLELIST,
-		rasterizer_state = sdl3.GPURasterizerState {
-			fill_mode = .FILL,
-			cull_mode = .BACK,
-			front_face = .CLOCKWISE,
-			enable_depth_clip = true,
-		},
-		target_info = sdl3.GPUGraphicsPipelineTargetInfo {
-			color_target_descriptions = raw_data(
-				[]sdl3.GPUColorTargetDescription {
-					// TODO: Does this work on other platforms (e.g., macOS?)
-					sdl3.GPUColorTargetDescription{format = sdl3.GPUTextureFormat.B8G8R8A8_UNORM},
-				},
-			),
-			num_color_targets         = 1,
-		},
-	}
-	graphics_pipeline := sdl3.CreateGPUGraphicsPipeline(gpu, graphics_pipeline_create_info)
-	if graphics_pipeline == nil {
-		HaltPrintingMessage("Could not create graphics pipeline.", source = .SDL)
-	}
-	state.graphics_pipeline = graphics_pipeline
-	log.debug("Graphics pipeline created.")
+	create_graphics_pipeline(&state)
 
 	// MARK: Test Mesh Registration
 	register_test_mesh(&state, {0, 0, 4})
