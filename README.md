@@ -1,6 +1,6 @@
 # rinsedmeat
 
-![a screenshot of a cube with debug (normals) lighting](doc/screenshot_cube_normal.png)
+![a screenshot of two cubes in front of one another with debug (normals) lighting. depth testing is working](doc/screenshot_two_cubes.png)
 
 learning computer graphics
 
