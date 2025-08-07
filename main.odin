@@ -411,19 +411,21 @@ Configuration :: struct {
 // multiple threads, breaking various subsystems sensibly would be advisable to avoid multiple threads mutating
 // the same state.
 EngineState :: struct {
-	resolution:        struct {
+	resolution:                     struct {
 		h: i32,
 		w: i32,
 	},
-	camera:            CameraState,
-	meshes:            [dynamic]ActiveMesh,
-	meshes_live:       [dynamic]bool,
+	camera:                         CameraState,
+	meshes:                         [dynamic]ActiveMesh,
+	meshes_live:                    [dynamic]bool,
 	// MARK: SDL3 GPU (Device, Shaders, etc.)
-	gpu:               ^sdl3.GPUDevice,
-	vertex_shader:     ^sdl3.GPUShader,
-	fragment_shader:   ^sdl3.GPUShader,
-	graphics_pipeline: ^sdl3.GPUGraphicsPipeline,
-	sdl_keystate:      [^]bool,
+	gpu:                            ^sdl3.GPUDevice,
+	vertex_shader:                  ^sdl3.GPUShader,
+	fragment_shader:                ^sdl3.GPUShader,
+	graphics_pipeline:              ^sdl3.GPUGraphicsPipeline,
+	sdl_keystate:                   [^]bool,
+	preferred_depth_texture_format: sdl3.GPUTextureFormat,
+	depth_texture:                  ^sdl3.GPUTexture,
 }
 
 // MARK: Mesh Management
@@ -700,11 +702,17 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 			store_op = sdl3.GPUStoreOp.STORE,
 		},
 	}
+	depth_target_info := sdl3.GPUDepthStencilTargetInfo {
+		texture     = state.depth_texture,
+		clear_depth = 1.0,
+		load_op     = .CLEAR,
+		store_op    = .DONT_CARE,
+	}
 	gpu_render_pass := sdl3.BeginGPURenderPass(
 		gpu_command_buffer,
 		raw_data(gpu_color_targets),
 		1,
-		nil,
+		&depth_target_info,
 	)
 
 	sdl3.BindGPUGraphicsPipeline(gpu_render_pass, state.graphics_pipeline)
@@ -983,6 +991,11 @@ create_graphics_pipeline :: proc(state: ^EngineState) {
 			front_face = .CLOCKWISE,
 			enable_depth_clip = true,
 		},
+		depth_stencil_state = sdl3.GPUDepthStencilState {
+			compare_op = .LESS,
+			enable_depth_test = true,
+			enable_depth_write = true,
+		},
 		target_info = sdl3.GPUGraphicsPipelineTargetInfo {
 			color_target_descriptions = raw_data(
 				[]sdl3.GPUColorTargetDescription {
@@ -991,6 +1004,8 @@ create_graphics_pipeline :: proc(state: ^EngineState) {
 				},
 			),
 			num_color_targets         = 1,
+			depth_stencil_format      = state.preferred_depth_texture_format,
+			has_depth_stencil_target  = true,
 		},
 	}
 	graphics_pipeline := sdl3.CreateGPUGraphicsPipeline(state.gpu, graphics_pipeline_create_info)
@@ -999,6 +1014,50 @@ create_graphics_pipeline :: proc(state: ^EngineState) {
 	}
 	state.graphics_pipeline = graphics_pipeline
 	log.debug("Graphics pipeline created.")
+}
+
+// MARK: Graphics Pipeline > Depth
+create_depth_texture :: proc(
+	device: ^sdl3.GPUDevice,
+	format: sdl3.GPUTextureFormat,
+	width: u32,
+	height: u32,
+) -> ^sdl3.GPUTexture {
+	// MARK: Depth texture configuration
+	depth_texture := sdl3.CreateGPUTexture(
+		device,
+		sdl3.GPUTextureCreateInfo {
+			type = .D2,
+			format = format,
+			usage = {.DEPTH_STENCIL_TARGET},
+			width = width,
+			height = height,
+			layer_count_or_depth = 1,
+			num_levels = 1,
+		},
+	)
+	if depth_texture == nil {
+		HaltPrintingMessage("Could not allocate depth texture", .SDL)
+	}
+
+	return depth_texture
+}
+
+get_preferred_depth_texture :: proc(device: ^sdl3.GPUDevice) -> sdl3.GPUTextureFormat {
+	if sdl3.GPUTextureSupportsFormat(device, .D32_FLOAT, .D2, {.DEPTH_STENCIL_TARGET}) {
+		log.debug("Depth textures will use D32_FLOAT")
+		return .D32_FLOAT
+	}
+
+	if sdl3.GPUTextureSupportsFormat(device, .D24_UNORM, .D2, {.DEPTH_STENCIL_TARGET}) {
+		log.debug("Depth textures will use D24_UNORM")
+		return .D24_UNORM
+	}
+
+	HaltPrintingMessage(
+		"Neither D32_FLOAT nor D24_UNORM supported. D16 is not acceptable. Quitting.",
+		.CUSTOM,
+	)
 }
 
 // MARK: Main Loop
@@ -1161,6 +1220,16 @@ main :: proc() {
 
 	log.debug("Shaders created!")
 
+	// MARK: Initial depth texture creation 
+	// In a better engine this would be structured but I am prototyping!
+	// TODO: This is a moronic thing to do inline
+	state.preferred_depth_texture_format = get_preferred_depth_texture(state.gpu)
+	state.depth_texture = create_depth_texture(
+		state.gpu,
+		state.preferred_depth_texture_format,
+		u32(state.resolution.w), // TODO: these conversions are ugly as sin!
+		u32(state.resolution.h),
+	)
 	create_graphics_pipeline(&state)
 
 	// MARK: Test Mesh Registration
@@ -1168,7 +1237,7 @@ main :: proc() {
 	// WARN:: Depth testing isn't configured because we don't bind a depth stencil texture.
 	// It seems Mr. Claude was correct.
 	// Thus, the below line causes multiple cubes to render... need to fix... but submission works.
-	// register_test_mesh(&state, {0, 0, 8})
+	register_test_mesh(&state, {0, 0, 8})
 
 	mouse_rel_ok := sdl3.SetWindowRelativeMouseMode(main_window, true)
 	if !mouse_rel_ok {
@@ -1181,6 +1250,7 @@ main :: proc() {
 			"Could not initialize exponentially weighted DT; smoothing out of range",
 		)
 	}
+
 
 	// MARK: Event Loop
 	sdl3.SetEventFilter(event_filter, nil)
@@ -1208,6 +1278,15 @@ main :: proc() {
 				}
 				state.resolution.h = h
 				state.resolution.w = w
+
+				// MARK: Update depth texture
+				sdl3.ReleaseGPUTexture(state.gpu, state.depth_texture)
+				state.depth_texture = create_depth_texture(
+					state.gpu,
+					state.preferred_depth_texture_format,
+					u32(state.resolution.w),
+					u32(state.resolution.h),
+				)
 			}
 		}
 		// MARK: Camera Keyboard Movement
