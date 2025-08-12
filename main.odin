@@ -1289,6 +1289,10 @@ main :: proc() {
 				)
 			}
 		}
+		// MARK: ESC to quit
+		if state.sdl_keystate[sdl3.Scancode.ESCAPE] {
+			should_keep_running = false
+		}
 		// MARK: Camera Keyboard Movement
 		keyboard_modstate := sdl3.GetModState()
 		state.camera.movement = map_keyboard_to_player_movement(
