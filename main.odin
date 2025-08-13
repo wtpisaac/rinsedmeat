@@ -1311,8 +1311,8 @@ main :: proc() {
 		// Horizontal movement should be an *x-axis* rotation
 		// Vertical movement should be a *y-axis* rotation
 		// Screen x, y inverted from the desired rotation axis
-		normalized_dx := (dy * 10) / (f32(state.resolution.w))
-		normalized_dy := (dx * 10) / (f32(state.resolution.h))
+		normalized_dx := (dy * 50) / (f32(state.resolution.w))
+		normalized_dy := (dx * 50) / (f32(state.resolution.h))
 
 		// NOTE: Camera should be able to move up and down [-90deg, 90deg]; clamp
 		// Camera should be able to spin around endlessly, wrap
@@ -1328,7 +1328,7 @@ main :: proc() {
 			&state.camera.position,
 			state.camera.rotation.y,
 			state.camera.movement,
-			0.5,
+			1.0,
 			dt_f,
 		)
 
