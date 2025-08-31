@@ -1,8 +1,10 @@
 #version 450
 
 layout(location = 0) in vec3 inPosition;
-layout(location = 1) in vec3 faceNormal;
-layout(location = 0) out vec3 fragColor;
+layout(location = 1) in vec2 inTexCoord;
+layout(location = 2) in vec3 faceNormal;
+layout(location = 0) out vec2 uv;
+layout(location = 1) out float light;
 
 layout(set = 1, binding = 0) uniform UniformBufferObject {
 	mat4 mat;
@@ -21,7 +23,6 @@ void main() {
 	
 	vec3 adj_face_normal = normalize(vec3(norm.mat * vec4(faceNormal, 0.0)));
 	float lighting_alignment = clamp(dot(NEGATIVE_Z, adj_face_normal), 0.0, 1.0);
-	float light = 0.1 + (0.9 * lighting_alignment);
-	fragColor = vec3(0.0, light, 0.0);
-	// fragColor = adj_face_normal;
+	light = 0.1 + (0.9 * lighting_alignment);
+	uv = inTexCoord;
 }

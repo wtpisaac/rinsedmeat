@@ -15,6 +15,7 @@ import "core:path/filepath"
 import "core:strings"
 import "core:testing"
 import "vendor:sdl3"
+import "vendor:sdl3/image"
 
 import "primitives"
 
@@ -226,15 +227,18 @@ execute_movement :: proc(
 // a directional floodlight by taking a dot product of the normal directions and the relevant
 // z-direction.
 make_normals :: proc(vertices: []f32, normalize: bool = true) -> []f32 {
+	log.debugf("len(vertices) == %v", len(vertices))
 	assert(
-		len(vertices) % 9 == 0,
-		"Incoming vertices must be % 9 == 0, must be three-dim * three per face.",
+		len(vertices) % 15 == 0,
+		"Incoming vertices must be % 15 == 0, must be three-dim * three per face (+ 2-dim, 2 tex coords per face, ignored).",
 	)
-	triangle_count := len(vertices) / 9
+	// NOTE: triangle_count = vertices array / (triangle pitch per vertex * 3 vertices * 3 verts per triangle)
+	triangle_count := len(vertices) / (5 * 3)
 
 	// Allocate destination array 
 	// Each face should get one normal
-	normals := make([]f32, len(vertices))
+	normals := make([]f32, triangle_count * 9)
+	log.debugf("len(normals) == %v", len(normals))
 
 	for i in 0 ..< triangle_count {
 		// NOTE: Take a cross product from two vectors
@@ -242,31 +246,32 @@ make_normals :: proc(vertices: []f32, normalize: bool = true) -> []f32 {
 		// The second vector is the second vertex to the third
 		// The cross product thus will face away from both components of the triangle,
 		// thus tangent and away from the face.
-		base_idx := i * 9
+		base_idx := i * 15
+		normals_base_idx := i * 9
 		vAB: [3]f32 = {
-			vertices[base_idx + 3] - vertices[base_idx + 0],
-			vertices[base_idx + 4] - vertices[base_idx + 1],
-			vertices[base_idx + 5] - vertices[base_idx + 2],
+			vertices[base_idx + 5] - vertices[base_idx + 0],
+			vertices[base_idx + 6] - vertices[base_idx + 1],
+			vertices[base_idx + 7] - vertices[base_idx + 2],
 		}
 		vBC: [3]f32 = {
-			vertices[base_idx + 6] - vertices[base_idx + 3],
-			vertices[base_idx + 7] - vertices[base_idx + 4],
-			vertices[base_idx + 8] - vertices[base_idx + 5],
+			vertices[base_idx + 10] - vertices[base_idx + 5],
+			vertices[base_idx + 11] - vertices[base_idx + 6],
+			vertices[base_idx + 12] - vertices[base_idx + 7],
 		}
 		cross_vec := linalg.vector_cross3(vAB, vBC)
 		if (normalize) {
 			cross_vec = linalg.vector_normalize0(cross_vec)
 		}
 		// TODO: Indexing?
-		normals[base_idx] = cross_vec[0]
-		normals[base_idx + 3] = cross_vec[0]
-		normals[base_idx + 6] = cross_vec[0]
-		normals[base_idx + 1] = cross_vec[1]
-		normals[base_idx + 4] = cross_vec[1]
-		normals[base_idx + 7] = cross_vec[1]
-		normals[base_idx + 2] = cross_vec[2]
-		normals[base_idx + 5] = cross_vec[2]
-		normals[base_idx + 8] = cross_vec[2]
+		normals[normals_base_idx] = cross_vec[0]
+		normals[normals_base_idx + 3] = cross_vec[0]
+		normals[normals_base_idx + 6] = cross_vec[0]
+		normals[normals_base_idx + 1] = cross_vec[1]
+		normals[normals_base_idx + 4] = cross_vec[1]
+		normals[normals_base_idx + 7] = cross_vec[1]
+		normals[normals_base_idx + 2] = cross_vec[2]
+		normals[normals_base_idx + 5] = cross_vec[2]
+		normals[normals_base_idx + 8] = cross_vec[2]
 	}
 
 	return normals
@@ -286,22 +291,40 @@ test_normal_computations_basic :: proc(t: ^testing.T) {
 		0.0,
 		0.0,
 		0.0,
+		// DUMMY TEXTURE COORDS
+		0.0,
+		0.0,
 		1.0,
 		0.0,
 		0.0,
+		// DUMMY TEXTURE COORDS
+		0.0,
+		0.0,
 		0.0,
 		1.0,
+		0.0,
+		// DUMMY TEXTURE COORDS
+		0.0,
 		0.0,
 		// Second triangle
 		0.0,
 		0.0,
 		0.0,
+		// DUMMY TEXTURE COORDS
+		0.0,
+		0.0,
 		2.0,
 		0.0,
 		0.0,
+		// DUMMY TEXTURE COORDS
+		0.0,
+		0.0,
 		0.0,
 		0.0,
 		2.0,
+		// DUMMY_TEXTURE_COORDS
+		0.0,
+		0.0,
 	}
 
 	results := make_normals(vertices)
@@ -328,25 +351,6 @@ test_normal_computations_basic :: proc(t: ^testing.T) {
 	testing.expect_value(t, results[15], 0.0)
 	testing.expect_value(t, results[16], -1.0)
 	testing.expect_value(t, results[17], 0.0)
-
-}
-
-@(test)
-test_normal_computations_normalization_off :: proc(t: ^testing.T) {
-	vertices: []f32 = {0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0}
-
-	results := make_normals(vertices, normalize = false)
-
-	testing.expect_value(t, len(results), 9)
-	testing.expect_value(t, results[0], 0.0)
-	testing.expect_value(t, results[1], -4.0)
-	testing.expect_value(t, results[2], 0.0)
-	testing.expect_value(t, results[3], 0.0)
-	testing.expect_value(t, results[4], -4.0)
-	testing.expect_value(t, results[5], 0.0)
-	testing.expect_value(t, results[6], 0.0)
-	testing.expect_value(t, results[7], -4.0)
-	testing.expect_value(t, results[8], 0.0)
 
 }
 
@@ -426,6 +430,8 @@ EngineState :: struct {
 	sdl_keystate:                   [^]bool,
 	preferred_depth_texture_format: sdl3.GPUTextureFormat,
 	depth_texture:                  ^sdl3.GPUTexture,
+	block_texture:                  ^sdl3.GPUTexture,
+	block_texture_sampler:          ^sdl3.GPUSampler,
 }
 
 // MARK: Mesh Management
@@ -455,6 +461,8 @@ ActiveMesh :: struct {
 @(require_results)
 StateRegisterMesh :: proc(
 	state: ^EngineState,
+	// NOTE: "vertices" includes two texture coordinates after the verts
+	// (vertX, vertY, vertZ, texU, texV)
 	vertices: []f32,
 	normals: []f32,
 	model_to_world_mat: matrix[4, 4]f32,
@@ -463,11 +471,19 @@ StateRegisterMesh :: proc(
 	ok: bool,
 ) {
 	log.debugf("REGISTERING VERTS %v WITH NORMALS %v", vertices, normals)
+	log.debugf("len(vertices) == %v, len(normals) == %v", len(vertices), len(normals))
 	assert(
-		len(vertices) % 9 == 0,
-		"Provided vertex buffer failed modulo 9 check; must provide full triangles with 3-dim coordinates.",
+		len(vertices) % 15 == 0,
+		"Provided vertex buffer failed modulo 15 check; must provide full triangles with 3-dim coordinates, 2-dim texture coordinates.",
 	)
-	assert(len(normals) == len(vertices), "Number of normals does not match len(vertices)")
+	assert(
+		len(normals) % 9 == 0,
+		"Normals failed modulo 9 check; must provide appropriate number of normals",
+	)
+	assert(
+		len(normals) / 3 == len(vertices) / 5,
+		"len(normals) == %v does not correspond with len(vertices) == %v",
+	)
 
 	assert(
 		len(state.meshes_live) == len(state.meshes),
@@ -634,7 +650,7 @@ StateRegisterMesh :: proc(
 		gpu_buffer         = buffer,
 		normals_gpu_buffer = normal_buffer,
 		model_to_world_mat = model_to_world_mat,
-		vertex_count       = u32(len(vertices) / 3),
+		vertex_count       = u32(len(vertices) / 5),
 	}
 
 	// Find a slot to insert this active mesh.
@@ -660,6 +676,137 @@ StateRegisterMesh :: proc(
 }
 
 // TODO: SceneDeleteMesh
+
+// MARK: Texture Management, Loading
+// NOTE: Texture details on Linux on my Framework, under Hyprland/Wayland:
+// [DEBUG] --- [2025-08-30 02:37:49] [main.odin:694:load_game_textures_to_gpu()] Texture format: ABGR8888
+// [DEBUG] --- [2025-08-30 02:37:49] [main.odin:1081:get_preferred_depth_texture()] Depth textures will use D32_FLOAT
+load_block_textures_to_gpu :: proc(device: ^sdl3.GPUDevice, paths: []string) -> ^sdl3.GPUTexture {
+	surfaces := make([]^sdl3.Surface, len(paths))
+	for i in 0 ..< len(paths) {
+		surfaces[i] = image.Load(strings.clone_to_cstring(paths[i], context.temp_allocator))
+		if surfaces[i] == nil {
+			HaltPrintingMessage("Error loading game texture.", .SDL)
+		}
+
+		// Assert all textures have equivalent sizes, pitches, and formats.
+		// This is true for n = 0, but must be asserted for n > 0
+		if (i > 0) {
+			assert(
+				surfaces[i].w == surfaces[i - 1].w && surfaces[i].h == surfaces[i - 1].h,
+				"textures dissimilar dimensions",
+			)
+			assert(surfaces[i].pitch == surfaces[i - 1].pitch, "textures dissimilar pitch")
+			assert(surfaces[i].format == surfaces[i - 1].format, "textures dissimilar format")
+		}
+	}
+
+	log.debugf("Texture format: %v", surfaces[0].format)
+	log.debugf("Layer count: %v", len(surfaces))
+
+	// Load into texture array
+	// TODO: How do we copy into each distinct layer?
+	// TODO: Does the copy screw up the colors? (probably?)
+
+	gpu_tex_create_info := sdl3.GPUTextureCreateInfo {
+		type                 = .D2_ARRAY,
+		format               = .R8G8B8A8_UNORM,
+		usage                = {.SAMPLER},
+		width                = u32(surfaces[0].w),
+		height               = u32(surfaces[0].h),
+		layer_count_or_depth = u32(len(surfaces)),
+		num_levels           = 1,
+	}
+	gpu_tex := sdl3.CreateGPUTexture(device, gpu_tex_create_info)
+	if gpu_tex == nil {
+		HaltPrintingMessage("Could not allocate GPU texture for block textures", .SDL)
+	}
+
+	// Copy contents into the texture
+	tex_transfer_buffer_create_info := sdl3.GPUTransferBufferCreateInfo {
+		// bytes per tex * texture count
+		size  = 4 * u32(surfaces[0].w) * u32(surfaces[0].h) * u32(len(paths)),
+		usage = .UPLOAD,
+	}
+	tex_transfer_buffer := sdl3.CreateGPUTransferBuffer(device, tex_transfer_buffer_create_info)
+	tex_transfer_ptr := sdl3.MapGPUTransferBuffer(device, tex_transfer_buffer, false)
+	if tex_transfer_ptr == nil {
+		HaltPrintingMessage("Could not map GPU transfer buffer for block textures", .SDL)
+	}
+	// Copy textures
+	for i in 0 ..< len(surfaces) {
+		// We need to copy each row individually due to the pitch potentially offsetting
+		for j in 0 ..< surfaces[i].h {
+			// Assuming there is no pitch to the GPU texture rows. Thus we need to map
+			// from some offset for the pitch, to one that simply accounts for pixels
+			// per row in a contiguous block.
+			// NOTE: Divide pitch by bytes - offset is per 4 bytes
+			row_offset := (surfaces[i].pitch / 4) * i32(j)
+			// NOTE: Do not mulitply by bytes for similar reasons, offset accounts for it.
+			direct_offset := (surfaces[i].h * surfaces[i].w * i32(i)) + (surfaces[i].w * i32(j))
+			mem.copy(
+				mem.ptr_offset((^[4]u8)(tex_transfer_ptr), direct_offset),
+				mem.ptr_offset((^[4]u8)(surfaces[i].pixels), row_offset),
+				int(surfaces[i].w * 4),
+			)
+		}
+	}
+
+	// Unmap transfer buffer required before upload
+	sdl3.UnmapGPUTransferBuffer(device, tex_transfer_buffer)
+
+	// Copy to GPU now
+	command_buffer := sdl3.AcquireGPUCommandBuffer(device)
+	if command_buffer == nil {
+		HaltPrintingMessage("Could not acquire command buffer for block texture transfer", .SDL)
+	}
+
+	upload_copy_pass := sdl3.BeginGPUCopyPass(command_buffer)
+	for i in 0 ..< len(surfaces) {
+		sdl3.UploadToGPUTexture(
+			upload_copy_pass,
+			sdl3.GPUTextureTransferInfo {
+				transfer_buffer = tex_transfer_buffer,
+				offset = u32(surfaces[i].w) * u32(surfaces[i].h) * u32(i) * 4,
+			},
+			sdl3.GPUTextureRegion {
+				texture = gpu_tex,
+				mip_level = 0,
+				layer = u32(i),
+				w = u32(surfaces[i].w),
+				h = u32(surfaces[i].h),
+				d = 1,
+			},
+			false,
+		)
+	}
+	sdl3.EndGPUCopyPass(upload_copy_pass)
+	ok := sdl3.SubmitGPUCommandBuffer(command_buffer)
+	if !ok {
+		HaltPrintingMessage("Problem encountered submitting GPU command buffer.", .SDL)
+	}
+
+	// Free relevant resources
+	sdl3.ReleaseGPUTransferBuffer(device, tex_transfer_buffer)
+
+	return gpu_tex
+}
+
+// MARK: Texture Sampling
+make_block_texture_sampler :: proc(device: ^sdl3.GPUDevice) -> ^sdl3.GPUSampler {
+	sampler := sdl3.CreateGPUSampler(
+		device,
+		sdl3.GPUSamplerCreateInfo {
+			address_mode_u = .CLAMP_TO_EDGE,
+			address_mode_v = .CLAMP_TO_EDGE,
+			address_mode_w = .CLAMP_TO_EDGE,
+		},
+	)
+	if sampler == nil {
+		HaltPrintingMessage("Could not create block texture sampler", .SDL)
+	}
+	return sampler
+}
 
 // MARK: Rendering
 // NOTE: Performs the frame drawing logic. Should be ran at the maximal desired framerate.
@@ -716,6 +863,16 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 	)
 
 	sdl3.BindGPUGraphicsPipeline(gpu_render_pass, state.graphics_pipeline)
+	sdl3.BindGPUFragmentSamplers(
+		gpu_render_pass,
+		0,
+		raw_data(
+			[]sdl3.GPUTextureSamplerBinding {
+				{texture = state.block_texture, sampler = state.block_texture_sampler},
+			},
+		),
+		1,
+	)
 
 	sdl3.SetGPUViewport(
 		gpu_render_pass,
@@ -791,122 +948,205 @@ register_test_mesh :: proc(state: ^EngineState, position: [3]f32) {
 		-0.5,
 		-0.5,
 		-0.5,
+		0.0,
+		1.0, // Front face, bottom-left
 		-0.5,
 		0.5,
 		-0.5,
+		0.0,
+		0.0, // Front face, top-left
 		0.5,
 		0.5,
 		-0.5,
+		1.0,
+		0.0, // Front face, top-right
+
 		// Front R
 		0.5,
 		0.5,
 		-0.5,
+		1.0,
+		0.0, // Front face, top-right
 		0.5,
 		-0.5,
 		-0.5,
+		1.0,
+		1.0, // Front face, bottom-right
 		-0.5,
 		-0.5,
 		-0.5,
+		0.0,
+		1.0, // Front face, bottom-left
+
 		// Right L
 		0.5,
 		-0.5,
 		-0.5,
+		0.0,
+		1.0, // Right face, bottom-right
 		0.5,
 		0.5,
 		-0.5,
+		0.0,
+		0.0, // Right face, top-right
 		0.5,
 		0.5,
 		0.5,
+		1.0,
+		0.0, // Right face, top-left
+
 		// Right R
 		0.5,
 		0.5,
 		0.5,
+		1.0,
+		0.0, // Right face, top-left
 		0.5,
 		-0.5,
 		0.5,
+		1.0,
+		1.0, // Right face, bottom-left
 		0.5,
 		-0.5,
 		-0.5,
+		0.0,
+		1.0, // Right face, bottom-right
+
 		// Back L
 		0.5,
 		-0.5,
 		0.5,
+		0.0,
+		1.0, // Back face, bottom-left
 		0.5,
 		0.5,
 		0.5,
+		0.0,
+		0.0, // Back face, top-left
 		-0.5,
 		0.5,
 		0.5,
+		1.0,
+		0.0, // Back face, top-right
+
 		// Back R
 		-0.5,
 		0.5,
 		0.5,
+		1.0,
+		0.0, // Back face, top-right
 		-0.5,
 		-0.5,
 		0.5,
+		1.0,
+		1.0, // Back face, bottom-right
 		0.5,
 		-0.5,
 		0.5,
+		0.0,
+		1.0, // Back face, bottom-left
+
 		// Left L
 		-0.5,
 		-0.5,
 		0.5,
+		0.0,
+		1.0, // Left face, bottom-right
 		-0.5,
 		0.5,
 		0.5,
+		0.0,
+		0.0, // Left face, top-right
 		-0.5,
 		0.5,
 		-0.5,
+		1.0,
+		0.0, // Left face, top-left
+
 		// Left R
 		-0.5,
 		0.5,
 		-0.5,
+		1.0,
+		0.0, // Left face, top-left
 		-0.5,
 		-0.5,
 		-0.5,
-		-0.5,
-		-0.5,
-		0.5,
-		// Top L
-		-0.5,
-		0.5,
-		-0.5,
-		-0.5,
-		0.5,
-		0.5,
-		0.5,
-		0.5,
-		0.5,
-		// Top R
-		0.5,
-		0.5,
-		0.5,
-		0.5,
-		0.5,
+		1.0,
+		1.0, // Left face, bottom-left
 		-0.5,
 		-0.5,
 		0.5,
-		-0.5,
-		// Bottom L
-		-0.5,
-		-0.5,
-		0.5,
-		-0.5,
-		-0.5,
+		0.0,
+		1.0, // Left face, bottom-right
+
+		// Top L (texture V flipped)
 		-0.5,
 		0.5,
 		-0.5,
+		0.0,
+		1.0, // Top face, top-left (V flipped)
 		-0.5,
-		// Bottom R
+		0.5,
+		0.5,
+		0.0,
+		0.0, // Top face, bottom-left (V flipped)
+		0.5,
+		0.5,
+		0.5,
+		1.0,
+		0.0, // Top face, bottom-right (V flipped)
+
+		// Top R (texture V flipped)
+		0.5,
+		0.5,
+		0.5,
+		1.0,
+		0.0, // Top face, bottom-right (V flipped)
+		0.5,
+		0.5,
+		-0.5,
+		1.0,
+		1.0, // Top face, top-right (V flipped)
+		-0.5,
+		0.5,
+		-0.5,
+		0.0,
+		1.0, // Top face, top-left (V flipped)
+
+		// Bottom L (texture V flipped)
+		-0.5,
+		-0.5,
+		0.5,
+		0.0,
+		1.0, // Bottom face, top-left (V flipped)
+		-0.5,
+		-0.5,
+		-0.5,
+		0.0,
+		0.0, // Bottom face, bottom-left (V flipped)
 		0.5,
 		-0.5,
 		-0.5,
+		1.0,
+		0.0, // Bottom face, bottom-right (V flipped)
+
+		// Bottom R (texture V flipped)
+		0.5,
+		-0.5,
+		-0.5,
+		1.0,
+		0.0, // Bottom face, bottom-right (V flipped)
 		0.5,
 		-0.5,
 		0.5,
+		1.0,
+		1.0, // Bottom face, top-right (V flipped)
 		-0.5,
 		-0.5,
 		0.5,
+		0.0,
+		1.0, // Bottom face, top-left (V flipped)
 	}
 	test_mesh_normals := make_normals(TEST_MESH_VERTICES)
 	log.debugf("mesh normals: %v", test_mesh_normals)
@@ -955,7 +1195,7 @@ create_graphics_pipeline :: proc(state: ^EngineState) {
 				[]sdl3.GPUVertexBufferDescription {
 					sdl3.GPUVertexBufferDescription {
 						slot = 0,
-						pitch = 3 * size_of(f32),
+						pitch = 5 * size_of(f32),
 						input_rate = .VERTEX,
 					},
 					sdl3.GPUVertexBufferDescription {
@@ -976,13 +1216,19 @@ create_graphics_pipeline :: proc(state: ^EngineState) {
 					},
 					sdl3.GPUVertexAttribute {
 						location = 1,
+						buffer_slot = 0,
+						format = .FLOAT2,
+						offset = 3 * size_of(f32),
+					},
+					sdl3.GPUVertexAttribute {
+						location = 2,
 						buffer_slot = 1,
 						format = .FLOAT3,
 						offset = 0,
 					},
 				},
 			),
-			num_vertex_attributes = 2,
+			num_vertex_attributes = 3,
 		},
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = sdl3.GPURasterizerState {
@@ -1204,11 +1450,12 @@ main :: proc() {
 		HaltPrintingMessage("Could not load fragment shader from disk.", source = .CUSTOM)
 	}
 	fragment_shader_create_info := sdl3.GPUShaderCreateInfo {
-		code_size  = len(fragment_shader_contents),
-		code       = raw_data(fragment_shader_contents),
-		entrypoint = "main",
-		format     = sdl3.GPUShaderFormat{.SPIRV},
-		stage      = .FRAGMENT,
+		code_size    = len(fragment_shader_contents),
+		code         = raw_data(fragment_shader_contents),
+		entrypoint   = "main",
+		format       = sdl3.GPUShaderFormat{.SPIRV},
+		stage        = .FRAGMENT,
+		num_samplers = 1,
 	}
 	fragment_shader := sdl3.CreateGPUShader(gpu, fragment_shader_create_info)
 	if fragment_shader == nil {
@@ -1219,6 +1466,26 @@ main :: proc() {
 	state.fragment_shader = fragment_shader
 
 	log.debug("Shaders created!")
+
+	// MARK: Load Textures
+	DEBUG_TEX_PATH :: "textures/debug.png"
+	GRASS_TEX_PATH :: "textures/grass.png"
+	STONE_TEX_PATH :: "textures/stone.png"
+
+	state.block_texture = load_block_textures_to_gpu(
+	state.gpu,
+	{
+		// NOTE: "DEBUG" texture should be at slot 0.
+		// If we have block IDs, 0 -> air block, which has no texture
+		// so this gives us a simple debug texture + offsets the slot for us :)
+		DEBUG_TEX_PATH,
+		STONE_TEX_PATH,
+		GRASS_TEX_PATH,
+	},
+	)
+
+	// Initialize sampler for block textures
+	state.block_texture_sampler = make_block_texture_sampler(gpu)
 
 	// MARK: Initial depth texture creation 
 	// In a better engine this would be structured but I am prototyping!

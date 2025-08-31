@@ -1,6 +1,6 @@
 # rinsedmeat
 
-![a screenshot of two cubes in front of one another with debug (normals) lighting. depth testing is working](doc/screenshot_two_cubes.png)
+![a screenshot of two cubes from the front and side, one further away than the other, with a debug texture of red and green on top, blue and yellow on the bottom, a black cross between them.](doc/screenshot_two_cubes_textured.png)
 
 learning computer graphics
 
