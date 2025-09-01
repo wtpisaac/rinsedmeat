@@ -1,6 +1,6 @@
 # rinsedmeat
 
-![a screenshot of two cubes from the front and side, one further away than the other, with a debug texture of red and green on top, blue and yellow on the bottom, a black cross between them.](doc/screenshot_two_cubes_textured.png)
+![a small little hut constructed of debug cubes, each debug cube with the faces red for upper-left, then green upper-right, then blue lower-left, then yellow bottom-right. hut has a 1x2 door in front.](doc/screenshot_debug_cubes_house.png)
 
 learning computer graphics
 

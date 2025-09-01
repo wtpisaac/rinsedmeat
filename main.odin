@@ -1172,6 +1172,414 @@ register_test_mesh :: proc(state: ^EngineState, position: [3]f32) {
 	log.debug("Test mesh submitted.")
 }
 
+// MARK: We have Minecraft at home
+
+// NOTE: Block layout to do this, for now:
+// [y][z][x]u16 (where u16 represents a block ID; avoiding u8 to get an idea of how
+// slow this will be with room to breathe for block choices
+
+MinecraftAtHomeResults :: struct {
+	vertex_buffer:  [dynamic]f32,
+	normals_buffer: [dynamic]f32,
+}
+
+// WARN: Minecraft at home:
+minecraft_at_home :: proc(blocks: [][][]u16) -> MinecraftAtHomeResults {
+	vertex_out_buffer: [dynamic]f32
+	normals_out_buffer: [dynamic]f32
+
+	y_chunk_limit := len(blocks)
+	z_chunk_limit := len(blocks[0])
+	x_chunk_limit := len(blocks[0][0])
+
+	for y in 0 ..< len(blocks) {
+		for z in 0 ..< len(blocks[y]) {
+			assert(len(blocks[y]) == z_chunk_limit, "nonaligned z layer")
+			for x in 0 ..< len(blocks[y][z]) {
+				assert(len(blocks[y][z]) == x_chunk_limit, "nonaligned x layer")
+				// If the visited block is 1, check its neighbors.
+				// If the neighbors are 0, add triangles with the relevant normal vector
+				// TODO: Append a texture ID to the vertex buffer
+				xf := f32(x)
+				yf := f32(y)
+				zf := f32(z)
+
+				if blocks[y][z][x] == 1 {
+					// Check down -y (or if y at 0)
+					if y == 0 || blocks[y - 1][z][x] == 0 {
+						vertex_additions: []f32 = {
+							// Upper UL
+							xf - 0.5,
+							yf - 0.5,
+							zf - 0.5,
+							1.0,
+							0.0,
+							xf + 0.5,
+							yf - 0.5,
+							zf - 0.5,
+							0.0,
+							0.0,
+							xf + 0.5,
+							yf - 0.5,
+							zf + 0.5,
+							0.0,
+							1.0,
+
+							// Lower LR
+							xf + 0.5,
+							yf - 0.5,
+							zf + 0.5,
+							0.0,
+							1.0,
+							xf - 0.5,
+							yf - 0.5,
+							zf + 0.5,
+							1.0,
+							1.0,
+							xf - 0.5,
+							yf - 0.5,
+							zf - 0.5,
+							1.0,
+							0.0,
+						}
+						normals_additions := make_normals(vertex_additions)
+						append(&vertex_out_buffer, ..vertex_additions)
+						append(&normals_out_buffer, ..normals_additions)
+					}
+					// Check up +y (or if y at limit)
+					if y == y_chunk_limit - 1 || blocks[y + 1][z][x] == 0 {
+						vertex_additions: []f32 = {
+							// Upper UL
+							xf - 0.5,
+							yf + 0.5,
+							zf - 0.5,
+							0.0,
+							1.0,
+							xf - 0.5,
+							yf + 0.5,
+							zf + 0.5,
+							0.0,
+							0.0,
+							xf + 0.5,
+							yf + 0.5,
+							zf + 0.5,
+							1.0,
+							0.0,
+
+							// Lower LR
+							xf + 0.5,
+							yf + 0.5,
+							zf + 0.5,
+							1.0,
+							0.0,
+							xf + 0.5,
+							yf + 0.5,
+							zf - 0.5,
+							1.0,
+							1.0,
+							xf - 0.5,
+							yf + 0.5,
+							zf - 0.5,
+							0.0,
+							1.0,
+						}
+						normals_additions := make_normals(vertex_additions)
+						append(&vertex_out_buffer, ..vertex_additions)
+						append(&normals_out_buffer, ..normals_additions)
+
+					}
+					// Check left -x (or if x at 0
+					if x == 0 || blocks[y][z][x - 1] == 0 {
+						vertex_additions: []f32 = {
+							// Left UL Triangle
+							xf - 0.5,
+							yf - 0.5,
+							zf + 0.5,
+							0.0,
+							1.0,
+							xf - 0.5,
+							yf + 0.5,
+							zf + 0.5,
+							0.0,
+							0.0,
+							xf - 0.5,
+							yf + 0.5,
+							zf - 0.5,
+							1.0,
+							0.0,
+
+							// Left LR Triangle
+							xf - 0.5,
+							yf + 0.5,
+							zf - 0.5,
+							1.0,
+							0.0,
+							xf - 0.5,
+							yf - 0.5,
+							zf - 0.5,
+							1.0,
+							1.0,
+							xf - 0.5,
+							yf - 0.5,
+							zf + 0.5,
+							0.0,
+							1.0,
+						}
+						normals_additions := make_normals(vertex_additions)
+						append(&vertex_out_buffer, ..vertex_additions)
+						append(&normals_out_buffer, ..normals_additions)
+
+					}
+					// Check right +x (or if x at limit)
+					if x == x_chunk_limit - 1 || blocks[y][z][x + 1] == 0 {
+						vertex_additions: []f32 = {
+							// Right UL
+							xf + 0.5,
+							yf - 0.5,
+							zf - 0.5,
+							0.0,
+							1.0,
+							xf + 0.5,
+							yf + 0.5,
+							zf - 0.5,
+							0.0,
+							0.0,
+							xf + 0.5,
+							yf + 0.5,
+							zf + 0.5,
+							1.0,
+							0.0,
+
+							// Lower LR
+							xf + 0.5,
+							yf + 0.5,
+							zf + 0.5,
+							1.0,
+							0.0,
+							xf + 0.5,
+							yf - 0.5,
+							zf + 0.5,
+							1.0,
+							1.0,
+							xf + 0.5,
+							yf - 0.5,
+							zf - 0.5,
+							0.0,
+							1.0,
+						}
+						normals_additions := make_normals(vertex_additions)
+						append(&vertex_out_buffer, ..vertex_additions)
+						append(&normals_out_buffer, ..normals_additions)
+
+					}
+					// Check forward -z or if z at zero)
+					if z == 0 || blocks[y][z - 1][x] == 0 {
+						vertex_additions: []f32 = {
+							// Front UL triangle
+							xf - 0.5,
+							yf - 0.5,
+							zf - 0.5,
+							0.0,
+							1.0,
+							xf - 0.5,
+							yf + 0.5,
+							zf - 0.5,
+							0.0,
+							0.0,
+							xf + 0.5,
+							yf + 0.5,
+							zf - 0.5,
+							1.0,
+							0.0,
+
+							// Front LR Triangle
+							xf + 0.5,
+							yf + 0.5,
+							zf - 0.5,
+							1.0,
+							0.0,
+							xf + 0.5,
+							yf - 0.5,
+							zf - 0.5,
+							1.0,
+							1.0,
+							xf - 0.5,
+							yf - 0.5,
+							zf - 0.5,
+							0.0,
+							1.0,
+						}
+						normals_additions := make_normals(vertex_additions)
+						append(&vertex_out_buffer, ..vertex_additions)
+						append(&normals_out_buffer, ..normals_additions)
+					}
+					// Check back +z (or if z at limit)
+					if z == z_chunk_limit - 1 || blocks[y][z + 1][x] == 0 {
+						vertex_additions: []f32 = {
+							// Back UL
+							xf + 0.5,
+							yf - 0.5,
+							zf + 0.5,
+							0.0,
+							1.0,
+							xf + 0.5,
+							yf + 0.5,
+							zf + 0.5,
+							0.0,
+							0.0,
+							xf - 0.5,
+							yf + 0.5,
+							zf + 0.5,
+							1.0,
+							0.0,
+
+							// Back LR
+							xf - 0.5,
+							yf + 0.5,
+							zf + 0.5,
+							1.0,
+							0.0,
+							xf - 0.5,
+							yf - 0.5,
+							zf + 0.5,
+							1.0,
+							1.0,
+							xf + 0.5,
+							yf - 0.5,
+							zf + 0.5,
+							0.0,
+							1.0,
+						}
+						normals_additions := make_normals(vertex_additions)
+						append(&vertex_out_buffer, ..vertex_additions)
+						append(&normals_out_buffer, ..normals_additions)
+					}
+				}
+			}
+		}
+	}
+
+	return {vertex_buffer = vertex_out_buffer, normals_buffer = normals_out_buffer}
+}
+
+register_test_cubes :: proc(state: ^EngineState, position: [3]f32) {
+	y_0: [][]u16 : {
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+		{0, 0, 1, 0, 0},
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+	}
+	y_1: [][]u16 : {
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+		{0, 0, 1, 0, 0},
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+	}
+	y_2: [][]u16 : {
+		{0, 0, 0, 0, 0},
+		{0, 0, 1, 0, 0},
+		{0, 1, 1, 1, 0},
+		{0, 0, 1, 0, 0},
+		{0, 0, 0, 0, 0},
+	}
+	y_3: [][]u16 : {
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+		{0, 0, 1, 0, 0},
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+	}
+	y_4: [][]u16 : {
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+	}
+
+	block_data: [][][]u16 : {y_0, y_1, y_2, y_3, y_4}
+	gpu_data := minecraft_at_home(block_data)
+	model_to_world_matrix := matrix[4, 4]f32{
+		1.0, 0.0, 0.0, position.x, 
+		0.0, 1.0, 0.0, position.y, 
+		0.0, 0.0, 1.0, position.z, 
+		0.0, 0.0, 0.0, 1.0, 
+	}
+	mesh, ok := StateRegisterMesh(
+		state,
+		gpu_data.vertex_buffer[:],
+		gpu_data.normals_buffer[:],
+		model_to_world_matrix,
+	)
+	if !ok {
+		HaltPrintingMessage("Could not register test blockdata-derived mesh.")
+	}
+}
+
+register_test_cubes_house :: proc(state: ^EngineState, position: [3]f32) {
+	y_0: [][]u16 : {
+		{1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1},
+		{1, 1, 1, 1, 1},
+	}
+	y_1: [][]u16 : {
+		{1, 1, 0, 1, 1},
+		{1, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1},
+		{1, 1, 1, 1, 1},
+	}
+	y_2: [][]u16 : {
+		{1, 1, 0, 1, 1},
+		{1, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1},
+		{1, 1, 1, 1, 1},
+	}
+	y_3: [][]u16 : {
+		{1, 1, 1, 1, 1},
+		{1, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1},
+		{1, 0, 0, 0, 1},
+		{1, 1, 1, 1, 1},
+	}
+	y_4: [][]u16 : {
+		{0, 0, 0, 0, 0},
+		{0, 1, 1, 1, 0},
+		{0, 1, 1, 1, 0},
+		{0, 1, 1, 1, 0},
+		{0, 0, 0, 0, 0},
+	}
+	y_5: [][]u16 : {
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+		{0, 0, 1, 0, 0},
+		{0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0},
+	}
+	block_data: [][][]u16 : {y_0, y_1, y_2, y_3, y_4, y_5}
+	gpu_data := minecraft_at_home(block_data)
+	model_to_world_matrix := matrix[4, 4]f32{
+		1.0, 0.0, 0.0, position.x, 
+		0.0, 1.0, 0.0, position.y, 
+		0.0, 0.0, 1.0, position.z, 
+		0.0, 0.0, 0.0, 1.0, 
+	}
+	mesh, ok := StateRegisterMesh(
+		state,
+		gpu_data.vertex_buffer[:],
+		gpu_data.normals_buffer[:],
+		model_to_world_matrix,
+	)
+	if !ok {
+		HaltPrintingMessage("Could not register test blockdata-derived mesh.")
+	}
+}
+
 // MARK: Event Filter
 // NOTE: Currently used solely to remove mouse motion events, to avoid queue saturation.
 event_filter :: proc "c" (user_data: rawptr, event: ^sdl3.Event) -> bool {
@@ -1500,11 +1908,15 @@ main :: proc() {
 	create_graphics_pipeline(&state)
 
 	// MARK: Test Mesh Registration
-	register_test_mesh(&state, {0, 0, 4})
+	// register_test_mesh(&state, {0, 0, 4})
 	// WARN:: Depth testing isn't configured because we don't bind a depth stencil texture.
 	// It seems Mr. Claude was correct.
 	// Thus, the below line causes multiple cubes to render... need to fix... but submission works.
-	register_test_mesh(&state, {0, 0, 8})
+	// register_test_mesh(&state, {0, 0, 8})
+
+	// register_test_cubes(&state, {-2, 0, 8})
+	register_test_cubes_house(&state, {-2, 0, 8})
+
 
 	mouse_rel_ok := sdl3.SetWindowRelativeMouseMode(main_window, true)
 	if !mouse_rel_ok {
