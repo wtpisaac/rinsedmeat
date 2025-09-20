@@ -102,11 +102,16 @@ CameraState :: struct {
 	movement: PlayerMovement,
 }
 
-make_camera_matrix :: proc(
+CameraMatrices :: struct {
+	camera_rotation: matrix[3, 3]f32,
+	world_to_camera: matrix[4, 4]f32,
+}
+
+make_camera_matrices :: proc(
 	position: [3]f32,
 	rotation_y_deg: f32,
 	rotation_x_deg: f32,
-) -> matrix[4, 4]f32 {
+) -> CameraMatrices {
 	// NOTE: A camera matrix's purpose is to transform the world space into the camera space.
 	// The "camera space" is the transformation of the space of the world into that which aligns the
 	// +Z direction into that of the ray pointing outwards of the camera lens.
@@ -144,9 +149,13 @@ make_camera_matrix :: proc(
 	// for y rotations - I believe because we are taking the transpose? In any case,
 	// x then y seems to do the job correctly without the unexpected spinning.
 	rotation_inv_matrix := rotation_y_inv_matrix * rotation_x_inv_matrix
+	camera_rotation_matrix := linalg.transpose((matrix[3, 3]f32)(rotation_inv_matrix))
 	rotation_matrix := linalg.transpose(rotation_inv_matrix)
 
-	return rotation_matrix * translation_matrix
+	return CameraMatrices {
+		world_to_camera = rotation_matrix * translation_matrix,
+		camera_rotation = camera_rotation_matrix,
+	}
 }
 
 camera_offset_to_world_offset :: proc(cam_y_rot_deg: f32, offset: [3]f32) -> [3]f32 {
@@ -158,6 +167,92 @@ camera_offset_to_world_offset :: proc(cam_y_rot_deg: f32, offset: [3]f32) -> [3]
 	}
 
 	return rotation_matrix * offset
+}
+
+// MARK: Camera Ray Box Intersection Implementation
+Ray :: struct {
+	origin:    [3]f32,
+	direction: [3]f32,
+	// Precomputed values for optimization
+	invdir:    [3]f32,
+	sign:      [3]int,
+}
+
+Ray_init :: proc(origin: [3]f32, direction: [3]f32) -> Ray {
+	invdir := 1 / direction
+
+	return Ray {
+		origin = origin,
+		direction = direction,
+		invdir = invdir,
+		sign = {invdir.x < 0 ? 1 : 0, invdir.y < 0 ? 1 : 0, invdir.z < 0 ? 1 : 0},
+	}
+}
+
+AABoundingBox :: struct {
+	min_corner: [3]f32,
+	max_corner: [3]f32,
+}
+
+RayBoxIntersectResult :: struct {
+	intersects:   bool,
+	intersection: [3]f32,
+	intersect_t:  f32,
+}
+
+ray_box_intersect :: proc(ray: Ray, box: AABoundingBox) -> RayBoxIntersectResult {
+	bounds: [2][3]f32 = {box.min_corner, box.max_corner}
+
+	t_min := (bounds[ray.sign.x].x - ray.origin.x) * ray.invdir.x
+	t_max := (bounds[1 - ray.sign.x].x - ray.origin.x) * ray.invdir.x
+	ty_min := (bounds[ray.sign.y].y - ray.origin.y) * ray.invdir.y
+	ty_max := (bounds[1 - ray.sign.y].y - ray.origin.y) * ray.invdir.y
+
+	if (t_min > ty_max) || (ty_min > t_max) {return {intersects = false}}
+
+	if ty_min > t_min {t_min = ty_min}
+	if ty_max < t_max {t_max = ty_max}
+
+	tz_min := (bounds[ray.sign.z].z - ray.origin.z) * ray.invdir.z
+	tz_max := (bounds[1 - ray.sign.z].z - ray.origin.z) * ray.invdir.z
+
+	if (t_min > tz_max) || (tz_min > t_max) {return {intersects = false}}
+
+	if tz_min > t_min {t_min = tz_min}
+	if tz_max < t_max {t_max = tz_max}
+
+	return {
+		intersects = true,
+		intersection = ray.origin + ray.direction * t_min,
+		intersect_t = t_min,
+	}
+}
+
+
+@(test)
+test_ray_box_intersect_intersects :: proc(t: ^testing.T) {
+	box := AABoundingBox {
+		min_corner = {-0.5, -0.5, 0.5},
+		max_corner = {0.5, 0.5, 1.0},
+	}
+	ray := Ray_init(origin = {0, 0, 0}, direction = {0, 0, 4})
+
+	intersect_results := ray_box_intersect(ray, box)
+
+	testing.expect(t, intersect_results.intersects, "Did not intersect when expected.")
+}
+
+@(test)
+test_ray_box_intersect_does_not_intersect :: proc(t: ^testing.T) {
+	box := AABoundingBox {
+		min_corner = {-0.5, -0.5, 0.5},
+		max_corner = {0.5, 0.5, 1.0},
+	}
+	ray := Ray_init(origin = {0, 0, 0}, direction = {4, 0, 0})
+
+	intersect_results := ray_box_intersect(ray, box)
+
+	testing.expect(t, !intersect_results.intersects, "Intersected when expected to miss.")
 }
 
 // MARK: Player Movement
@@ -227,7 +322,7 @@ execute_movement :: proc(
 // a directional floodlight by taking a dot product of the normal directions and the relevant
 // z-direction.
 make_normals :: proc(vertices: []f32, normalize: bool = true) -> []f32 {
-	log.debugf("len(vertices) == %v", len(vertices))
+	// log.debugf("len(vertices) == %v", len(vertices))
 	assert(
 		len(vertices) % 15 == 0,
 		"Incoming vertices must be % 15 == 0, must be three-dim * three per face (+ 2-dim, 2 tex coords per face, ignored).",
@@ -238,7 +333,7 @@ make_normals :: proc(vertices: []f32, normalize: bool = true) -> []f32 {
 	// Allocate destination array 
 	// Each face should get one normal
 	normals := make([]f32, triangle_count * 9)
-	log.debugf("len(normals) == %v", len(normals))
+	// log.debugf("len(normals) == %v", len(normals))
 
 	for i in 0 ..< triangle_count {
 		// NOTE: Take a cross product from two vectors
@@ -432,6 +527,8 @@ EngineState :: struct {
 	depth_texture:                  ^sdl3.GPUTexture,
 	block_texture:                  ^sdl3.GPUTexture,
 	block_texture_sampler:          ^sdl3.GPUSampler,
+	block_data:                     ^BlockData,
+	chunk_mesh_id:                  map[[2]int]int,
 }
 
 // MARK: Mesh Management
@@ -446,6 +543,7 @@ ActiveMesh :: struct {
 	normals_gpu_buffer: ^sdl3.GPUBuffer,
 	model_to_world_mat: matrix[4, 4]f32,
 	vertex_count:       u32,
+	slot:               int,
 }
 
 // TODO: Make this attach to the Scene, or ditch the Scene concept for the prototype.
@@ -671,11 +769,20 @@ StateRegisterMesh :: proc(
 		append(&state.meshes, active_mesh)
 		append(&state.meshes_live, true)
 	}
+	active_mesh.slot = i
 
 	return active_mesh, true
 }
 
-// TODO: SceneDeleteMesh
+StateDeleteMesh :: proc(state: ^EngineState, slot: int) -> bool {
+	state.meshes[slot].live = false
+	state.meshes_live[slot] = false
+
+	sdl3.ReleaseGPUBuffer(state.gpu, state.meshes[slot].gpu_buffer)
+	sdl3.ReleaseGPUBuffer(state.gpu, state.meshes[slot].normals_gpu_buffer)
+
+	return true
+}
 
 // MARK: Texture Management, Loading
 // NOTE: Texture details on Linux on my Framework, under Hyprland/Wayland:
@@ -844,7 +951,7 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 	gpu_color_targets := []sdl3.GPUColorTargetInfo {
 		{
 			texture = swapchain_tex,
-			clear_color = {0.1, 0.1, 0.1, 1.0},
+			clear_color = {3.0 / 255.0, 194.0 / 255.0, 252.0 / 255.0, 1.0},
 			load_op = sdl3.GPULoadOp.CLEAR,
 			store_op = sdl3.GPUStoreOp.STORE,
 		},
@@ -904,18 +1011,15 @@ draw_frame :: proc(state: EngineState, window: ^sdl3.Window) {
 		)
 		perspective_matrix := make_perspective_matrix(
 			1.0,
-			20,
+			100.0,
 			// NOTE: vFOV currently hack from 90 deg hFOV on 16:9 via below calculator.
 			// https://themetalmuncher.github.io/fov-calc/
 			47,
 			f32(state.resolution.w),
 			f32(state.resolution.h),
 		)
-		camera_matrix := make_camera_matrix(
-			state.camera.position,
-			state.camera.rotation.y,
-			state.camera.rotation.x,
-		)
+		camera_matrix :=
+			make_camera_matrices(state.camera.position, state.camera.rotation.y, state.camera.rotation.x).world_to_camera
 		mvp := perspective_matrix * camera_matrix * mesh.model_to_world_mat
 		sdl3.PushGPUVertexUniformData(gpu_command_buffer, 0, raw_data(&mvp), size_of(mvp))
 
@@ -1173,6 +1277,88 @@ register_test_mesh :: proc(state: ^EngineState, position: [3]f32) {
 }
 
 // MARK: We have Minecraft at home
+// NOTE: BLOCK DATA ZC XC Y Z X
+
+CHUNKS_PER_HORIZONTAL :: 16
+CHUNK_SIZE :: 16
+CHUNK_HEIGHT :: 128
+GROUND_HEIGHT :: 0
+WORLD_LIMIT_HORIZONTAL :: CHUNKS_PER_HORIZONTAL * CHUNK_SIZE
+WORLD_LIMIT_VERTICAL :: CHUNK_HEIGHT
+
+BlockData :: struct {
+	chunks:
+	[CHUNKS_PER_HORIZONTAL][CHUNKS_PER_HORIZONTAL][CHUNK_HEIGHT][CHUNK_SIZE][CHUNK_SIZE]u16,
+}
+
+BlockData_make_and_register :: proc(state: ^EngineState) {
+	BlockData_init(&state.block_data)
+	BlockData_register_initial(state, state.block_data)
+}
+
+BlockData_init :: proc(data_addr: ^^BlockData) {
+	// Initialize BlockData onto heap
+	data := new(BlockData)
+
+	for zc in 0 ..< CHUNKS_PER_HORIZONTAL {
+		for xc in 0 ..< CHUNKS_PER_HORIZONTAL {
+			for z in 0 ..< CHUNK_SIZE {
+				for x in 0 ..< CHUNK_SIZE {
+					data.chunks[zc][xc][0][z][x] = 1
+				}
+			}
+		}
+	}
+
+	data_addr^ = data
+}
+
+BlockData_register_initial :: proc(state: ^EngineState, data: ^BlockData) {
+	for zc in 0 ..< CHUNKS_PER_HORIZONTAL {
+		for xc in 0 ..< CHUNKS_PER_HORIZONTAL {
+			gpu_data := minecraft_at_home(state.block_data.chunks[zc][xc])
+			model_to_world_matrix := matrix[4, 4]f32{
+				1.0, 0.0, 0.0, f32(xc * CHUNK_SIZE), 
+				0.0, 1.0, 0.0, GROUND_HEIGHT, 
+				0.0, 0.0, 1.0, f32(zc * CHUNK_SIZE), 
+				0.0, 0.0, 0.0, 1.0, 
+			}
+			mesh, ok := StateRegisterMesh(
+				state,
+				gpu_data.vertex_buffer[:],
+				gpu_data.normals_buffer[:],
+				model_to_world_matrix,
+			)
+			if !ok {
+				HaltPrintingMessage("Could not register test blockdata-derived mesh.")
+			}
+			state.chunk_mesh_id[{zc, xc}] = mesh.slot
+		}
+	}
+}
+
+BlockData_reloadChunk :: proc(state: ^EngineState, zc: int, xc: int) {
+	StateDeleteMesh(state, state.chunk_mesh_id[{zc, xc}])
+
+	gpu_data := minecraft_at_home(state.block_data.chunks[zc][xc])
+	model_to_world_matrix := matrix[4, 4]f32{
+		1.0, 0.0, 0.0, f32(xc * CHUNK_SIZE), 
+		0.0, 1.0, 0.0, GROUND_HEIGHT, 
+		0.0, 0.0, 1.0, f32(zc * CHUNK_SIZE), 
+		0.0, 0.0, 0.0, 1.0, 
+	}
+	mesh, ok := StateRegisterMesh(
+		state,
+		gpu_data.vertex_buffer[:],
+		gpu_data.normals_buffer[:],
+		model_to_world_matrix,
+	)
+	if !ok {
+		HaltPrintingMessage("Could not register test blockdata-derived mesh.")
+	}
+	state.chunk_mesh_id[{zc, xc}] = mesh.slot
+
+}
 
 // NOTE: Block layout to do this, for now:
 // [y][z][x]u16 (where u16 represents a block ID; avoiding u8 to get an idea of how
@@ -1184,7 +1370,9 @@ MinecraftAtHomeResults :: struct {
 }
 
 // WARN: Minecraft at home:
-minecraft_at_home :: proc(blocks: [][][]u16) -> MinecraftAtHomeResults {
+minecraft_at_home :: proc(
+	blocks: [CHUNK_HEIGHT][CHUNK_SIZE][CHUNK_SIZE]u16,
+) -> MinecraftAtHomeResults {
 	vertex_out_buffer: [dynamic]f32
 	normals_out_buffer: [dynamic]f32
 
@@ -1462,122 +1650,168 @@ minecraft_at_home :: proc(blocks: [][][]u16) -> MinecraftAtHomeResults {
 	return {vertex_buffer = vertex_out_buffer, normals_buffer = normals_out_buffer}
 }
 
-register_test_cubes :: proc(state: ^EngineState, position: [3]f32) {
-	y_0: [][]u16 : {
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-		{0, 0, 1, 0, 0},
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-	}
-	y_1: [][]u16 : {
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-		{0, 0, 1, 0, 0},
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-	}
-	y_2: [][]u16 : {
-		{0, 0, 0, 0, 0},
-		{0, 0, 1, 0, 0},
-		{0, 1, 1, 1, 0},
-		{0, 0, 1, 0, 0},
-		{0, 0, 0, 0, 0},
-	}
-	y_3: [][]u16 : {
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-		{0, 0, 1, 0, 0},
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-	}
-	y_4: [][]u16 : {
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-	}
+// MARK: Block Placement / Removal
+BLOCK_PLACEMENT_RANGE :: 10
 
-	block_data: [][][]u16 : {y_0, y_1, y_2, y_3, y_4}
-	gpu_data := minecraft_at_home(block_data)
-	model_to_world_matrix := matrix[4, 4]f32{
-		1.0, 0.0, 0.0, position.x, 
-		0.0, 1.0, 0.0, position.y, 
-		0.0, 0.0, 1.0, position.z, 
-		0.0, 0.0, 0.0, 1.0, 
-	}
-	mesh, ok := StateRegisterMesh(
-		state,
-		gpu_data.vertex_buffer[:],
-		gpu_data.normals_buffer[:],
-		model_to_world_matrix,
-	)
-	if !ok {
-		HaltPrintingMessage("Could not register test blockdata-derived mesh.")
+LookingAtResults :: struct {
+	looking_at: Maybe([3]int),
+	// NOTE: Adjacent is the block position of the block adjacent to the
+	// intersected face of the camera ray.
+	// WARN: Adjacent should only be populated if there is a valid,
+	// in-range adjacent coordinate.
+	adjacent:   Maybe([3]int),
+}
+
+camera_coordinate_to_block_coordinate :: proc(camera_position: [3]f32) -> [3]int {
+	return {
+		int(math.round_f32(camera_position.x)),
+		int(math.round_f32(camera_position.y)),
+		int(math.round_f32(camera_position.z)),
 	}
 }
 
-register_test_cubes_house :: proc(state: ^EngineState, position: [3]f32) {
-	y_0: [][]u16 : {
-		{1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1},
-		{1, 1, 1, 1, 1},
-	}
-	y_1: [][]u16 : {
-		{1, 1, 0, 1, 1},
-		{1, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1},
-		{1, 1, 1, 1, 1},
-	}
-	y_2: [][]u16 : {
-		{1, 1, 0, 1, 1},
-		{1, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1},
-		{1, 1, 1, 1, 1},
-	}
-	y_3: [][]u16 : {
-		{1, 1, 1, 1, 1},
-		{1, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1},
-		{1, 0, 0, 0, 1},
-		{1, 1, 1, 1, 1},
-	}
-	y_4: [][]u16 : {
-		{0, 0, 0, 0, 0},
-		{0, 1, 1, 1, 0},
-		{0, 1, 1, 1, 0},
-		{0, 1, 1, 1, 0},
-		{0, 0, 0, 0, 0},
-	}
-	y_5: [][]u16 : {
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-		{0, 0, 1, 0, 0},
-		{0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0},
-	}
-	block_data: [][][]u16 : {y_0, y_1, y_2, y_3, y_4, y_5}
-	gpu_data := minecraft_at_home(block_data)
-	model_to_world_matrix := matrix[4, 4]f32{
-		1.0, 0.0, 0.0, position.x, 
-		0.0, 1.0, 0.0, position.y, 
-		0.0, 0.0, 1.0, position.z, 
-		0.0, 0.0, 0.0, 1.0, 
-	}
-	mesh, ok := StateRegisterMesh(
-		state,
-		gpu_data.vertex_buffer[:],
-		gpu_data.normals_buffer[:],
-		model_to_world_matrix,
+
+compute_looking_at_block :: proc(state: ^EngineState) -> LookingAtResults {
+	// We want to start a walk from the camera position, rounded to the nearest block,
+	// then walk outwards. This should create a cube around the camera, probably not
+	// as clean as a sphere but easiest for a first pass.
+
+	block_coord_at_camera := camera_coordinate_to_block_coordinate(state.camera.position)
+	ray_direction_vector: [3]f32 = {0.0, 0.0, 1.0}
+	log.debugf("orig ray: %v", ray_direction_vector)
+	ray_direction_vector *=
+		make_camera_matrices(state.camera.position, state.camera.rotation.y, state.camera.rotation.x).camera_rotation
+	ray_direction_vector = BLOCK_PLACEMENT_RANGE * linalg.vector_normalize(ray_direction_vector)
+	log.debugf("ray: %v", ray_direction_vector)
+
+	camera_ray := Ray_init(state.camera.position, ray_direction_vector)
+	log.debugf("ray origin: %v", camera_ray.origin)
+
+	// Iterate over the neighborhood with some radius, run the ray intersect test,
+	// and pick the result (if any) that is lowest
+
+	low_x_bound := clamp(
+		block_coord_at_camera.x - BLOCK_PLACEMENT_RANGE,
+		0.0,
+		WORLD_LIMIT_HORIZONTAL,
 	)
-	if !ok {
-		HaltPrintingMessage("Could not register test blockdata-derived mesh.")
+	hi_x_bound := clamp(
+		block_coord_at_camera.x + BLOCK_PLACEMENT_RANGE,
+		0.0,
+		WORLD_LIMIT_HORIZONTAL,
+	)
+	low_y_bound := clamp(
+		block_coord_at_camera.y - BLOCK_PLACEMENT_RANGE,
+		0.0,
+		WORLD_LIMIT_VERTICAL,
+	)
+	hi_y_bound := clamp(block_coord_at_camera.y + BLOCK_PLACEMENT_RANGE, 0.0, WORLD_LIMIT_VERTICAL)
+	low_z_bound := clamp(
+		block_coord_at_camera.z - BLOCK_PLACEMENT_RANGE,
+		0.0,
+		WORLD_LIMIT_HORIZONTAL,
+	)
+	hi_z_bound := clamp(
+		block_coord_at_camera.z + BLOCK_PLACEMENT_RANGE,
+		0.0,
+		WORLD_LIMIT_HORIZONTAL,
+	)
+
+	closest_intersection: Maybe(RayBoxIntersectResult) = nil
+
+	for x in low_x_bound ..= hi_x_bound {
+		for y in low_y_bound ..= hi_y_bound {
+			for z in low_z_bound ..= hi_z_bound {
+				// NOTE: Exclude camera itself
+				if x == block_coord_at_camera.x &&
+				   y == block_coord_at_camera.y &&
+				   z == block_coord_at_camera.z {
+					continue
+				}
+				if state.block_data.chunks[z / CHUNK_SIZE][x / CHUNK_SIZE][y][z % CHUNK_SIZE][x % CHUNK_SIZE] ==
+				   0 {
+					continue
+				}
+
+				block_box := AABoundingBox {
+					min_corner = {f32(x) - 0.5, f32(y) - 0.5, f32(z) - 0.5},
+					max_corner = {f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5},
+				}
+				result := ray_box_intersect(camera_ray, block_box)
+				if !result.intersects {continue}
+				if closest_intersection == nil {
+					closest_intersection = result
+					continue
+				}
+				if closest_intersection.?.intersect_t > result.intersect_t {
+					closest_intersection = result
+					continue
+				}
+			}
+		}
 	}
+
+	if closest_intersection == nil {
+		return {looking_at = nil, adjacent = nil}
+	}
+	intersection := closest_intersection.?
+
+	looking_at := camera_coordinate_to_block_coordinate(intersection.intersection)
+	adjacent: Maybe([3]int)
+	log.debugf("T: %v", intersection.intersect_t)
+	log.debugf(
+		"Computed intersection coordinates: %v",
+		camera_ray.origin + intersection.intersect_t * camera_ray.direction,
+	)
+	// Compute adjacent block by walking backwards by a small amount until the block changes
+	for t := intersection.intersect_t; t > 0.0; t -= math.F32_EPSILON {
+		world_coords := camera_ray.origin + t * camera_ray.direction
+		block_coords := camera_coordinate_to_block_coordinate(world_coords)
+		if block_coords == looking_at {continue}
+		if block_coords == block_coord_at_camera {break}
+		// Found adjacent?
+		adjacent = block_coords
+		break
+	}
+
+	return {looking_at = looking_at, adjacent = adjacent}
+}
+
+handle_place_block_action :: proc(state: ^EngineState) {
+	looking_at := compute_looking_at_block(state)
+	log.debugf("place, looking at %v", looking_at)
+	if looking_at.adjacent == nil {return}
+	x := looking_at.adjacent.?.x
+	y := looking_at.adjacent.?.y
+	z := looking_at.adjacent.?.z
+	if state.block_data.chunks[z / CHUNK_SIZE][x / CHUNK_SIZE][y][z % CHUNK_SIZE][x % CHUNK_SIZE] ==
+	   0 {
+		zc := z / CHUNK_SIZE
+		xc := x / CHUNK_SIZE
+
+		state.block_data.chunks[zc][xc][y][z % CHUNK_SIZE][x % CHUNK_SIZE] = 1
+
+		BlockData_reloadChunk(state, zc, xc)
+	}
+}
+
+handle_destroy_block_action :: proc(state: ^EngineState) {
+	looking_at := compute_looking_at_block(state)
+	log.debug("destroy, looking at %v", looking_at)
+	if looking_at.adjacent == nil {return}
+	x := looking_at.looking_at.?.x
+	y := looking_at.looking_at.?.y
+	z := looking_at.looking_at.?.z
+	if state.block_data.chunks[z / CHUNK_SIZE][x / CHUNK_SIZE][y][z % CHUNK_SIZE][x % CHUNK_SIZE] ==
+	   1 {
+		zc := z / CHUNK_SIZE
+		xc := x / CHUNK_SIZE
+
+		state.block_data.chunks[zc][xc][y][z % CHUNK_SIZE][x % CHUNK_SIZE] = 0
+
+		BlockData_reloadChunk(state, zc, xc)
+	}
+
 }
 
 // MARK: Event Filter
@@ -1753,9 +1987,11 @@ main :: proc() {
 			h = i32(configuration.resolution.window_height),
 		},
 		sdl_keystate = sdl3.GetKeyboardState(nil),
+		camera = {position = {0, 2, 0}},
 	}
 	// Logging
 	context.logger = log.create_console_logger()
+	context.logger.lowest_level = .Debug
 	log.info("rinsedmeat - engine demo created by Isaac Trimble-Pederson")
 
 	log.infof(
@@ -1907,16 +2143,7 @@ main :: proc() {
 	)
 	create_graphics_pipeline(&state)
 
-	// MARK: Test Mesh Registration
-	// register_test_mesh(&state, {0, 0, 4})
-	// WARN:: Depth testing isn't configured because we don't bind a depth stencil texture.
-	// It seems Mr. Claude was correct.
-	// Thus, the below line causes multiple cubes to render... need to fix... but submission works.
-	// register_test_mesh(&state, {0, 0, 8})
-
-	// register_test_cubes(&state, {-2, 0, 8})
-	register_test_cubes_house(&state, {-2, 0, 8})
-
+	BlockData_make_and_register(&state)
 
 	mouse_rel_ok := sdl3.SetWindowRelativeMouseMode(main_window, true)
 	if !mouse_rel_ok {
@@ -1966,6 +2193,15 @@ main :: proc() {
 					u32(state.resolution.w),
 					u32(state.resolution.h),
 				)
+			}
+			if event.type == .MOUSE_BUTTON_DOWN {
+				log.debugf("Mouse button %v down.", event.button.button)
+				if event.button.button == 1 {
+					handle_destroy_block_action(&state)
+				} // left button 
+				if event.button.button == 3 {
+					handle_place_block_action(&state)
+				} // right button
 			}
 		}
 		// MARK: ESC to quit
