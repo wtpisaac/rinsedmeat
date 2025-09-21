@@ -1670,6 +1670,20 @@ camera_coordinate_to_block_coordinate :: proc(camera_position: [3]f32) -> [3]int
 	}
 }
 
+addr_for_block :: proc(state: ^EngineState, block_position: [3]int) -> Maybe(^u16) {
+	if block_position.x < 0 ||
+	   block_position.x > WORLD_LIMIT_HORIZONTAL - 1 ||
+	   block_position.z < 0 ||
+	   block_position.z > WORLD_LIMIT_HORIZONTAL - 1 ||
+	   block_position.y < 0 ||
+	   block_position.y > WORLD_LIMIT_VERTICAL - 1 {
+		return nil
+	}
+	return(
+		&(state.block_data.chunks[block_position.z / CHUNK_SIZE][block_position.x / CHUNK_SIZE][block_position.y][block_position.z % CHUNK_SIZE][block_position.x % CHUNK_SIZE]) \
+	)
+}
+
 
 compute_looking_at_block :: proc(state: ^EngineState) -> LookingAtResults {
 	// We want to start a walk from the camera position, rounded to the nearest block,
@@ -1693,31 +1707,36 @@ compute_looking_at_block :: proc(state: ^EngineState) -> LookingAtResults {
 	low_x_bound := clamp(
 		block_coord_at_camera.x - BLOCK_PLACEMENT_RANGE,
 		0.0,
-		WORLD_LIMIT_HORIZONTAL,
+		WORLD_LIMIT_HORIZONTAL - 1,
 	)
 	hi_x_bound := clamp(
 		block_coord_at_camera.x + BLOCK_PLACEMENT_RANGE,
 		0.0,
-		WORLD_LIMIT_HORIZONTAL,
+		WORLD_LIMIT_HORIZONTAL - 1,
 	)
 	low_y_bound := clamp(
 		block_coord_at_camera.y - BLOCK_PLACEMENT_RANGE,
 		0.0,
-		WORLD_LIMIT_VERTICAL,
+		WORLD_LIMIT_VERTICAL - 1,
 	)
-	hi_y_bound := clamp(block_coord_at_camera.y + BLOCK_PLACEMENT_RANGE, 0.0, WORLD_LIMIT_VERTICAL)
+	hi_y_bound := clamp(
+		block_coord_at_camera.y + BLOCK_PLACEMENT_RANGE,
+		0.0,
+		WORLD_LIMIT_VERTICAL - 1,
+	)
 	low_z_bound := clamp(
 		block_coord_at_camera.z - BLOCK_PLACEMENT_RANGE,
 		0.0,
-		WORLD_LIMIT_HORIZONTAL,
+		WORLD_LIMIT_HORIZONTAL - 1,
 	)
 	hi_z_bound := clamp(
 		block_coord_at_camera.z + BLOCK_PLACEMENT_RANGE,
 		0.0,
-		WORLD_LIMIT_HORIZONTAL,
+		WORLD_LIMIT_HORIZONTAL - 1,
 	)
 
 	closest_intersection: Maybe(RayBoxIntersectResult) = nil
+	looking_at: [3]int
 
 	for x in low_x_bound ..= hi_x_bound {
 		for y in low_y_bound ..= hi_y_bound {
@@ -1728,8 +1747,7 @@ compute_looking_at_block :: proc(state: ^EngineState) -> LookingAtResults {
 				   z == block_coord_at_camera.z {
 					continue
 				}
-				if state.block_data.chunks[z / CHUNK_SIZE][x / CHUNK_SIZE][y][z % CHUNK_SIZE][x % CHUNK_SIZE] ==
-				   0 {
+				if addr_for_block(state, {x, y, z}).?^ == 0 {
 					continue
 				}
 
@@ -1741,10 +1759,12 @@ compute_looking_at_block :: proc(state: ^EngineState) -> LookingAtResults {
 				if !result.intersects {continue}
 				if closest_intersection == nil {
 					closest_intersection = result
+					looking_at = {x, y, z}
 					continue
 				}
 				if closest_intersection.?.intersect_t > result.intersect_t {
 					closest_intersection = result
+					looking_at = {x, y, z}
 					continue
 				}
 			}
@@ -1756,7 +1776,6 @@ compute_looking_at_block :: proc(state: ^EngineState) -> LookingAtResults {
 	}
 	intersection := closest_intersection.?
 
-	looking_at := camera_coordinate_to_block_coordinate(intersection.intersection)
 	adjacent: Maybe([3]int)
 	log.debugf("T: %v", intersection.intersect_t)
 	log.debugf(
@@ -1780,38 +1799,29 @@ compute_looking_at_block :: proc(state: ^EngineState) -> LookingAtResults {
 handle_place_block_action :: proc(state: ^EngineState) {
 	looking_at := compute_looking_at_block(state)
 	log.debugf("place, looking at %v", looking_at)
-	if looking_at.adjacent == nil {return}
-	x := looking_at.adjacent.?.x
-	y := looking_at.adjacent.?.y
-	z := looking_at.adjacent.?.z
-	if state.block_data.chunks[z / CHUNK_SIZE][x / CHUNK_SIZE][y][z % CHUNK_SIZE][x % CHUNK_SIZE] ==
-	   0 {
-		zc := z / CHUNK_SIZE
-		xc := x / CHUNK_SIZE
-
-		state.block_data.chunks[zc][xc][y][z % CHUNK_SIZE][x % CHUNK_SIZE] = 1
-
-		BlockData_reloadChunk(state, zc, xc)
+	adjacent, has_adjacent := looking_at.adjacent.?
+	if !has_adjacent {return}
+	adj_addr, adj_valid := addr_for_block(state, adjacent).?
+	if !adj_valid {return}
+	// Double check that the adjacent is 0 - I suspect bugs could be possible with this logic as-is...
+	// So this is just an added check. Don't need it for the looking_at since that is inherent in
+	// the result.
+	if adj_addr^ == 0 {
+		adj_addr^ = 1
+		BlockData_reloadChunk(state, adjacent.z / CHUNK_SIZE, adjacent.x / CHUNK_SIZE)
 	}
 }
 
 handle_destroy_block_action :: proc(state: ^EngineState) {
-	looking_at := compute_looking_at_block(state)
-	log.debug("destroy, looking at %v", looking_at)
-	if looking_at.adjacent == nil {return}
-	x := looking_at.looking_at.?.x
-	y := looking_at.looking_at.?.y
-	z := looking_at.looking_at.?.z
-	if state.block_data.chunks[z / CHUNK_SIZE][x / CHUNK_SIZE][y][z % CHUNK_SIZE][x % CHUNK_SIZE] ==
-	   1 {
-		zc := z / CHUNK_SIZE
-		xc := x / CHUNK_SIZE
+	looking_at_results := compute_looking_at_block(state)
+	log.debug("destroy, looking at %v", looking_at_results)
 
-		state.block_data.chunks[zc][xc][y][z % CHUNK_SIZE][x % CHUNK_SIZE] = 0
-
-		BlockData_reloadChunk(state, zc, xc)
-	}
-
+	looking_at, has_looking_at := looking_at_results.looking_at.?
+	if !has_looking_at {return}
+	looking_at_addr, looking_at_valid := addr_for_block(state, looking_at).?
+	if !looking_at_valid {return}
+	looking_at_addr^ = 0
+	BlockData_reloadChunk(state, looking_at.z / CHUNK_SIZE, looking_at.x / CHUNK_SIZE)
 }
 
 // MARK: Event Filter
