@@ -20,6 +20,8 @@ a personal website for myself again.
 - Odin compiler, dev 2025-08 (or later)
 - SDL3
 - SDL3_image
+- Vulkan (see below remarks for macOS. Windows should have it vendored
+by GPU manufacturer drivers, but not fully sure).
 
 Both of the SDL libraries use Odin's vendored bindings.
 
