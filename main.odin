@@ -2035,6 +2035,11 @@ main :: proc() {
 	init_ok := sdl3.Init(sdl3.InitFlags{.VIDEO, .EVENTS})
 	if (!init_ok) {HaltPrintingMessage("SDL could not initialize with .VIDEO and .EVENTS. Are you running this in a limited (non-GUI) environment?", source = .SDL)}
 
+	// Load Vulkan where required
+	vulkan_ok := sdl3.Vulkan_LoadLibrary(nil)
+	if !vulkan_ok {
+		HaltPrintingMessage("Could not load Vulkan library!")
+	}
 	// Enable Vulkan Validation Hints
 	sdl3.SetHint("SDL_RENDER_VULKAN_DEBUG", "1")
 
