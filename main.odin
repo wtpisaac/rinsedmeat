@@ -2,7 +2,9 @@ package main
 
 /*
 rinsedmeat - voxel engine prototyping
-copyright (c) 2025 Isaac Trimble-Pederson, All Rights Reserved
+copyright (c) 2025 Isaac Trimble-Pederson
+
+Licensed under the CC0 license.
 */
 
 import "core:log"
